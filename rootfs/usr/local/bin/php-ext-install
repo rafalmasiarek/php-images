@@ -1,0 +1,63 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+  echo "Usage:"
+  echo "  php-ext-install pecl <name> [--apk <dev deps...>] [--runtime <runtime pkgs...>]"
+  exit 2
+}
+
+MODE="${1:-}"; [ -z "$MODE" ] && usage
+shift || true
+
+if [ "$MODE" != "pecl" ]; then
+  echo "Only 'pecl' mode is supported."
+  exit 2
+fi
+
+EXT="${1:-}"; [ -z "$EXT" ] && usage
+shift || true
+
+APK_DEPS=""
+RUNTIME_PKGS=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --apk)
+      shift
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        APK_DEPS="$APK_DEPS $1"
+        shift
+      done
+      ;;
+    --runtime)
+      shift
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+        RUNTIME_PKGS="$RUNTIME_PKGS $1"
+        shift
+      done
+      ;;
+    -h|--help) usage ;;
+    *) echo "Unknown arg: $1"; usage ;;
+  esac
+done
+
+[ -n "${RUNTIME_PKGS# }" ] && apk add --no-cache $RUNTIME_PKGS
+
+apk add --no-cache --virtual .php-ext-build $PHPIZE_DEPS linux-headers pkgconfig re2c git $APK_DEPS || true
+
+pecl channel-update pecl.php.net >/dev/null 2>&1 || true
+yes '' | pecl install "$EXT"
+docker-php-ext-enable "$EXT"
+
+mkdir -p /opt/php-ext/conf.d/available
+if [ -d /usr/local/etc/php/conf.d ]; then
+  for f in /usr/local/etc/php/conf.d/*"$EXT"*.ini; do
+    [ -e "$f" ] || continue
+    mv "$f" "/opt/php-ext/conf.d/available/$(basename "$f")"
+  done
+fi
+
+apk del .php-ext-build >/dev/null 2>&1 || true
+
+echo "OK: INI available in /opt/php-ext/conf.d/available/"

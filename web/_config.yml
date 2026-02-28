@@ -1,0 +1,6 @@
+title: PHP Base Images Catalog
+description: Container images built by php-base-images repo
+theme: minima
+plugins:
+  - jekyll-seo-tag
+markdown: kramdown

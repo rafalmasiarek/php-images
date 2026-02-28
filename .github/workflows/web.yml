@@ -1,0 +1,83 @@
+name: web-catalog
+
+on:
+  push:
+    paths:
+      - "web/**"
+      - "versions.json"
+      - "scripts/gen-web-catalog.py"
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: "Where to deploy"
+        required: false
+        default: "pages"
+        type: choice
+        options: [pages, rsync]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate catalog include
+        run: python scripts/gen-web-catalog.py
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: web
+
+      - name: Build site
+        working-directory: web
+        run: bundle exec jekyll build -d ../_site_web
+
+      - name: Upload Pages artifact
+        if: (github.event.inputs.deploy_target == 'pages') || (github.event_name == 'push')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site_web
+
+  deploy-pages:
+    if: (github.event.inputs.deploy_target == 'pages') || (github.event_name == 'push')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-rsync:
+    if: github.event.inputs.deploy_target == 'rsync'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y rsync
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.RSYNC_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "${{ secrets.RSYNC_SSH_PORT || '22' }}" "${{ secrets.RSYNC_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync to server
+        env:
+          RSYNC_HOST: ${{ secrets.RSYNC_SSH_HOST }}
+          RSYNC_USER: ${{ secrets.RSYNC_SSH_USER }}
+          RSYNC_PORT: ${{ secrets.RSYNC_SSH_PORT || '22' }}
+          RSYNC_PATH: ${{ secrets.RSYNC_SSH_PATH }}
+        run: |
+          rsync -az --delete -e "ssh -p ${RSYNC_PORT}" _site_web/ "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}/"

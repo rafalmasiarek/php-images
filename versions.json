@@ -1,0 +1,64 @@
+{
+  "defaults": {
+    "alpine_tag": "alpine",
+    "image_name": "php-base-images"
+  },
+  "images": [
+    {
+      "php": "8.3",
+      "variant": "fpm",
+      "alpine_tag": "alpine",
+      "flavor": "base",
+      "context": "versions/8.3/fpm-alpine/base"
+    },
+    {
+      "php": "8.3",
+      "variant": "fpm",
+      "alpine_tag": "alpine",
+      "flavor": "fat",
+      "context": "versions/8.3/fpm-alpine/fat"
+    },
+    {
+      "php": "8.3",
+      "variant": "cli",
+      "alpine_tag": "alpine",
+      "flavor": "base",
+      "context": "versions/8.3/cli-alpine/base"
+    },
+    {
+      "php": "8.3",
+      "variant": "cli",
+      "alpine_tag": "alpine",
+      "flavor": "fat",
+      "context": "versions/8.3/cli-alpine/fat"
+    },
+    {
+      "php": "8.2",
+      "variant": "fpm",
+      "alpine_tag": "alpine",
+      "flavor": "base",
+      "context": "versions/8.2/fpm-alpine/base"
+    },
+    {
+      "php": "8.2",
+      "variant": "fpm",
+      "alpine_tag": "alpine",
+      "flavor": "fat",
+      "context": "versions/8.2/fpm-alpine/fat"
+    },
+    {
+      "php": "8.2",
+      "variant": "cli",
+      "alpine_tag": "alpine",
+      "flavor": "base",
+      "context": "versions/8.2/cli-alpine/base"
+    },
+    {
+      "php": "8.2",
+      "variant": "cli",
+      "alpine_tag": "alpine",
+      "flavor": "fat",
+      "context": "versions/8.2/cli-alpine/fat"
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+name: build-php-base-images
+
+on:
+  push:
+    branches: [ "main" ]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Publish destination"
+        required: false
+        default: "ghcr"
+        type: choice
+        options: [ghcr, custom]
+      custom_namespace:
+        description: "Custom namespace override (e.g. registry.example.com/team)"
+        required: false
+        default: ""
+
+env:
+  IMAGE_NAME: php-base-images
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: "8.3"
+            variant: "fpm"
+            alpine_tag: "alpine"
+            flavor: "base"
+            context: "versions/8.3/fpm-alpine/base"
+          - php: "8.3"
+            variant: "fpm"
+            alpine_tag: "alpine"
+            flavor: "fat"
+            context: "versions/8.3/fpm-alpine/fat"
+          - php: "8.3"
+            variant: "cli"
+            alpine_tag: "alpine"
+            flavor: "base"
+            context: "versions/8.3/cli-alpine/base"
+          - php: "8.3"
+            variant: "cli"
+            alpine_tag: "alpine"
+            flavor: "fat"
+            context: "versions/8.3/cli-alpine/fat"
+          - php: "8.2"
+            variant: "fpm"
+            alpine_tag: "alpine"
+            flavor: "base"
+            context: "versions/8.2/fpm-alpine/base"
+          - php: "8.2"
+            variant: "fpm"
+            alpine_tag: "alpine"
+            flavor: "fat"
+            context: "versions/8.2/fpm-alpine/fat"
+          - php: "8.2"
+            variant: "cli"
+            alpine_tag: "alpine"
+            flavor: "base"
+            context: "versions/8.2/cli-alpine/base"
+          - php: "8.2"
+            variant: "cli"
+            alpine_tag: "alpine"
+            flavor: "fat"
+            context: "versions/8.2/cli-alpine/fat"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide publish namespace
+        id: ns
+        shell: bash
+        run: |
+          TARGET="${{ github.event.inputs.publish_target }}"
+          [ -z "$TARGET" ] && TARGET="ghcr"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+          if [ "$TARGET" = "custom" ]; then
+            if [ -z "${{ secrets.REGISTRY_HOST }}" ] || [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_PASSWORD }}" ]; then
+              echo "Missing secrets: REGISTRY_HOST/REGISTRY_USERNAME/REGISTRY_PASSWORD" >&2
+              exit 1
+            fi
+
+            if [ -n "${{ github.event.inputs.custom_namespace }}" ]; then
+              NAMESPACE="${{ github.event.inputs.custom_namespace }}"
+            else
+              if [ -n "${{ secrets.IMAGE_NAMESPACE }}" ]; then
+                NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ secrets.IMAGE_NAMESPACE }}"
+              else
+                NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ github.repository_owner }}"
+              fi
+            fi
+            echo "namespace=$NAMESPACE" >> "$GITHUB_OUTPUT"
+          else
+            echo "namespace=ghcr.io/${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to custom registry
+        if: steps.ns.outputs.target == 'custom'
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_HOST }}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+
+      - name: Login to GHCR
+        if: steps.ns.outputs.target == 'ghcr'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute base image
+        id: base
+        shell: bash
+        run: |
+          BASE="php:${{ matrix.php }}-${{ matrix.variant }}-${{ matrix.alpine_tag }}"
+          echo "base_image=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Compute tags
+        id: tags
+        shell: bash
+        run: |
+          PREFIX="${{ matrix.php }}-${{ matrix.variant }}-${{ matrix.alpine_tag }}-${{ matrix.flavor }}"
+          ./scripts/compute-tags.sh "${{ steps.ns.outputs.namespace }}" "${{ env.IMAGE_NAME }}" "$PREFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.base_image }}
+          tags: |
+            ${{ steps.tags.outputs.TAG_MOVING }}
+            ${{ steps.tags.outputs.TAG_DATE }}
+            ${{ steps.tags.outputs.TAG_SHA }}
+          provenance: false
+          sbom: false

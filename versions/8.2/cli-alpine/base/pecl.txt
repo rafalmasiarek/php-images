@@ -1,0 +1,7 @@
+# BASE
+redis
+apcu
+mongodb
+msgpack
+mailparse
+xdebug

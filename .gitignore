@@ -1,0 +1,6 @@
+.DS_Store
+*.log
+/vendor
+/.bundle
+/_site
+_site_web
