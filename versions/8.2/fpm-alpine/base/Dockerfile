@@ -37,7 +37,8 @@ RUN if apk info -e net-snmp-dev; then docker-php-ext-install snmp; fi
 RUN if apk info -e imap-dev; then docker-php-ext-install imap; fi
 RUN if apk info -e openldap-dev; then docker-php-ext-install ldap; fi
 RUN if apk info -e unixodbc-dev; then \
-    docker-php-ext-configure odbc --with-unixODBC=/usr && \
+    export CPPFLAGS="-I/usr/include" LDFLAGS="-L/usr/lib"; \
+    docker-php-ext-configure odbc --with-unixODBC=shared,/usr; \
     docker-php-ext-install -j"$(nproc)" odbc; \
     fi
 
