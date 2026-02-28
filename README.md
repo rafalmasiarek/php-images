@@ -28,7 +28,5 @@ php-ext-install pecl igbinary
 php-ext-install pecl imagick --runtime imagemagick --apk imagemagick-dev
 ```
 
----
-
 ## License
 MIT
