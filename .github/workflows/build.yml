@@ -2,7 +2,7 @@ name: build-php-base-images
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -139,11 +139,13 @@ jobs:
       - name: Build & push (multi-arch)
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
+          context: .
+          file: ${{ matrix.context }}/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             BASE_IMAGE=${{ steps.base.outputs.base_image }}
+            PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: |
             ${{ steps.tags.outputs.TAG_MOVING }}
             ${{ steps.tags.outputs.TAG_DATE }}
