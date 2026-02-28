@@ -8,10 +8,6 @@ Multi-arch (amd64+arm64) PHP base images.
 
 | PHP | Base tag | Flavor | Image tag prefix | PECL modules (declared) |
 | - | - | - | - | - |
-| 8.2 | cli-alpine | base | `8.2-cli-alpine-base` | redis, apcu, mongodb, msgpack, mailparse, xdebug |
-| 8.2 | cli-alpine | fat | `8.2-cli-alpine-fat` | redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov |
-| 8.2 | fpm-alpine | base | `8.2-fpm-alpine-base` | redis, apcu, mongodb, msgpack, mailparse, xdebug |
-| 8.2 | fpm-alpine | fat | `8.2-fpm-alpine-fat` | redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov |
 | 8.3 | cli-alpine | base | `8.3-cli-alpine-base` | redis, apcu, mongodb, msgpack, mailparse, xdebug |
 | 8.3 | cli-alpine | fat | `8.3-cli-alpine-fat` | redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov |
 | 8.3 | fpm-alpine | base | `8.3-fpm-alpine-base` | redis, apcu, mongodb, msgpack, mailparse, xdebug |
