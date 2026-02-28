@@ -44,22 +44,6 @@ RUN if apk info -e libiodbc-dev; then \
 RUN pecl channel-update pecl.php.net
 ARG PECL_FILE=pecl.txt
 COPY ${PECL_FILE} /tmp/pecl.txt
-RUN if apk info -e imagemagick-dev && command -v pkg-config >/dev/null 2>&1; then \
-    cat > /usr/local/bin/MagickWand-config <<'SH'; \
-    #!/bin/sh
-    set -eu
-pc="MagickWand"
-case "${1:-}" in
---version)  pkg-config --modversion "$pc" ;;
---cflags)   pkg-config --cflags "$pc" ;;
---libs)     pkg-config --libs "$pc" ;;
---prefix)   echo "/usr" ;;
-*)          echo "$(pkg-config --cflags "$pc") $(pkg-config --libs "$pc")" ;;
-esac
-SH
-chmod +x /usr/local/bin/MagickWand-config; \
-    ln -sf /usr/local/bin/MagickWand-config /usr/local/bin/Wand-config; \
-    fi
 RUN set -euo pipefail; \
     mods=""; \
     while IFS= read -r line; do \
