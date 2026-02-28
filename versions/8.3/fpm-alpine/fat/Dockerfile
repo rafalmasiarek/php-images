@@ -34,9 +34,12 @@ RUN docker-php-ext-install -j"$(nproc)" \
     tidy xsl zip
 
 RUN if apk info -e net-snmp-dev; then docker-php-ext-install snmp; fi
-RUN if apk info -e unixodbc-dev; then docker-php-ext-install odbc; fi
 RUN if apk info -e imap-dev; then docker-php-ext-install imap; fi
 RUN if apk info -e openldap-dev; then docker-php-ext-install ldap; fi
+RUN if apk info -e unixodbc-dev; then \
+    docker-php-ext-configure odbc --with-unixODBC=/usr && \
+    docker-php-ext-install -j"$(nproc)" odbc; \
+    fi
 
 RUN pecl channel-update pecl.php.net
 ARG PECL_FILE=pecl.txt
