@@ -13,7 +13,7 @@ RUN apk add --no-cache \
     freetype-dev libpng-dev libjpeg-turbo-dev gettext-dev
 
 RUN apk add --no-cache \
-    openldap-dev imap-dev krb5-dev net-snmp-dev unixodbc-dev \
+    openldap-dev imap-dev krb5-dev net-snmp-dev libiodbc-dev libiodbc \
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
     imagemagick-dev imagemagick \
     || true
@@ -36,9 +36,8 @@ RUN docker-php-ext-install -j"$(nproc)" \
 RUN if apk info -e net-snmp-dev; then docker-php-ext-install snmp; fi
 RUN if apk info -e imap-dev; then docker-php-ext-install imap; fi
 RUN if apk info -e openldap-dev; then docker-php-ext-install ldap; fi
-RUN if apk info -e unixodbc-dev; then \
-    export CPPFLAGS="-I/usr/include" LDFLAGS="-L/usr/lib"; \
-    docker-php-ext-configure odbc --with-unixODBC=shared,/usr; \
+RUN if apk info -e libiodbc-dev; then \
+    docker-php-ext-configure odbc --with-iodbc=/usr && \
     docker-php-ext-install -j"$(nproc)" odbc; \
     fi
 
@@ -65,6 +64,7 @@ RUN mkdir -p /opt/php-ext/conf.d/available \
     done; \
     fi
 
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE} AS runtime
 
 RUN apk add --no-cache \
@@ -72,7 +72,7 @@ RUN apk add --no-cache \
     icu-libs libzip zlib bzip2 curl openssl oniguruma \
     sqlite-libs postgresql-libs libxml2 libxslt tidyhtml gmp \
     freetype libpng libjpeg-turbo gettext \
-    openldap cyrus-sasl krb5 net-snmp-libs unixodbc \
+    openldap cyrus-sasl krb5 net-snmp-libs libiodbc \
     rabbitmq-c libssh2 libmemcached imagemagick \
     || true
 
