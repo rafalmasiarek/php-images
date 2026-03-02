@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "docker"
+    directory: "/versions/8.3/fpm"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "docker"
+    directory: "/versions/8.3/cli"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "docker"
+    directory: "/versions/8.2/fpm"
+    schedule:
+      interval: "daily"
+  - package-ecosystem: "docker"
+    directory: "/versions/8.2/cli"
+    schedule:
+      interval: "daily"

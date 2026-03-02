@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - "web/**"
-      - "versions.json"
+      - "versions/**"
       - "scripts/gen-web-catalog.py"
   workflow_dispatch:
     inputs:
