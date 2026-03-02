@@ -2,6 +2,7 @@
 FROM php:8.3-cli-alpine3.20 AS builder
 
 ARG PECL_FILE=pecl.txt
+COPY ${PECL_FILE} /tmp/pecl.txt
 
 RUN set -eux; \
     apk add --no-cache bash ca-certificates tzdata git; \
@@ -33,6 +34,16 @@ RUN set -eux; \
     ; \
     \
     pecl channel-update pecl.php.net; \
+    mods=""; \
+    while IFS= read -r line; do \
+    line="$(echo "$line" | sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')"; \
+    [ -z "$line" ] && continue; \
+    mods="$mods $line"; \
+    done < /tmp/pecl.txt; \
+    if [ -n "${mods// }" ]; then \
+    pecl install $mods; \
+    docker-php-ext-enable $mods; \
+    fi; \
     \
     mkdir -p /opt/php-ext/conf.d/available; \
     if [ -d /usr/local/etc/php/conf.d ]; then \
@@ -43,27 +54,6 @@ RUN set -eux; \
     fi; \
     \
     apk del .build-deps
-
-COPY ${PECL_FILE} /tmp/pecl.txt
-
-RUN set -euo pipefail; \
-    mods=""; \
-    while IFS= read -r line; do \
-    line="$(echo "$line" | sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')"; \
-    [ -z "$line" ] && continue; \
-    mods="$mods $line"; \
-    done < /tmp/pecl.txt; \
-    if [ -n "${mods// }" ]; then \
-    pecl install $mods; \
-    docker-php-ext-enable $mods; \
-    mkdir -p /opt/php-ext/conf.d/available; \
-    if [ -d /usr/local/etc/php/conf.d ]; then \
-    for f in /usr/local/etc/php/conf.d/*.ini; do \
-    [ -e "$f" ] || continue; \
-    mv "$f" "/opt/php-ext/conf.d/available/$(basename "$f")"; \
-    done; \
-    fi; \
-    fi
 
 FROM php:8.3-cli-alpine3.20 AS runtime
 

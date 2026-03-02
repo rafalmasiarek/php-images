@@ -3,6 +3,8 @@ FROM php:8.2-cli-alpine3.20 AS builder
 
 ARG PECL_FILE=pecl.txt
 
+COPY ${PECL_FILE} /tmp/pecl.txt
+
 RUN set -eux; \
     apk add --no-cache bash ca-certificates tzdata git; \
     apk add --no-cache --virtual .build-deps \
@@ -10,7 +12,7 @@ RUN set -eux; \
     icu-dev libzip-dev zlib-dev bzip2-dev curl-dev openssl-dev oniguruma-dev \
     sqlite-dev postgresql-dev libxml2-dev libxslt-dev tidyhtml-dev gmp-dev \
     freetype-dev libpng-dev libjpeg-turbo-dev gettext-dev \
-    openldap-dev imap-dev krb5-dev net-snmp-dev\
+    openldap-dev imap-dev krb5-dev net-snmp-dev \
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
     imagemagick-dev imagemagick \
     ; \
@@ -34,19 +36,6 @@ RUN set -eux; \
     \
     pecl channel-update pecl.php.net; \
     \
-    mkdir -p /opt/php-ext/conf.d/available; \
-    if [ -d /usr/local/etc/php/conf.d ]; then \
-    for f in /usr/local/etc/php/conf.d/*.ini; do \
-    [ -e "$f" ] || continue; \
-    mv "$f" "/opt/php-ext/conf.d/available/$(basename "$f")"; \
-    done; \
-    fi; \
-    \
-    apk del .build-deps
-
-COPY ${PECL_FILE} /tmp/pecl.txt
-
-RUN set -euo pipefail; \
     mods=""; \
     while IFS= read -r line; do \
     line="$(echo "$line" | sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')"; \
@@ -56,6 +45,8 @@ RUN set -euo pipefail; \
     if [ -n "${mods// }" ]; then \
     pecl install $mods; \
     docker-php-ext-enable $mods; \
+    fi; \
+    \
     mkdir -p /opt/php-ext/conf.d/available; \
     if [ -d /usr/local/etc/php/conf.d ]; then \
     for f in /usr/local/etc/php/conf.d/*.ini; do \
@@ -63,7 +54,8 @@ RUN set -euo pipefail; \
     mv "$f" "/opt/php-ext/conf.d/available/$(basename "$f")"; \
     done; \
     fi; \
-    fi
+    \
+    apk del .build-deps
 
 FROM php:8.2-cli-alpine3.20 AS runtime
 
