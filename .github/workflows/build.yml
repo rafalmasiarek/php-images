@@ -1,4 +1,4 @@
-name: build-php-base-images
+name: build-php-images
 
 on:
   push:
@@ -19,55 +19,74 @@ on:
         default: ""
 
 env:
-  IMAGE_NAME: php-base-images
+  IMAGE_NAME: php
 
 jobs:
   matrix:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
+      count: ${{ steps.gen.outputs.count }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Generate build matrix from versions/ tree
+      - name: Generate build matrix from versions/ tree (only changed on push)
         id: gen
         shell: bash
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
           python - <<'PY'
-          import json
-          import os
+          import json, os, subprocess
           from pathlib import Path
 
           root = Path("versions")
           include = []
 
-          # expected: versions/<php>/<variant>/Dockerfile
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          before = os.environ.get("GITHUB_EVENT_BEFORE", "")
+          sha = os.environ.get("GITHUB_SHA", "")
+
+          changed = None
+          if event == "push" and before and before != "0000000000000000000000000000000000000000":
+            out = subprocess.check_output(["git", "diff", "--name-only", f"{before}..{sha}"], text=True)
+            changed = set(p.strip() for p in out.splitlines() if p.strip())
+
           for dockerfile in sorted(root.glob("*/*/Dockerfile")):
             php = dockerfile.parts[1]
-            variant = dockerfile.parts[2]  # cli or fpm (or other in future)
-            context = str(dockerfile.parent)
+            variant = dockerfile.parts[2]  # cli/fpm
+            context_dir = dockerfile.parent
 
-            # sanity: require pecl.txt to exist (optional - allow missing)
+            dockerfile_rel = str(dockerfile)
+            pecl_rel = str(context_dir / "pecl.txt")
+
+            # On push: build only if Dockerfile or pecl.txt changed
+            if changed is not None:
+              if dockerfile_rel not in changed and pecl_rel not in changed:
+                continue
+
             include.append({
               "php": php,
               "variant": variant,
-              "context": context
+              "context": str(context_dir)
             })
-
-          if not include:
-            raise SystemExit("No Dockerfiles found under versions/<php>/<variant>/Dockerfile")
 
           matrix = {"include": include}
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
             fh.write("matrix=" + json.dumps(matrix) + "\n")
+            fh.write("count=" + str(len(include)) + "\n")
           PY
 
   build:
     needs: matrix
+    if: needs.matrix.outputs.count != '0'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      security-events: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
@@ -129,7 +148,21 @@ jobs:
           PREFIX="${{ matrix.php }}-${{ matrix.variant }}"
           ./scripts/compute-tags.sh "${{ steps.ns.outputs.namespace }}" "${{ env.IMAGE_NAME }}" "$PREFIX" >> "$GITHUB_OUTPUT"
 
+      - name: Docker meta (OCI labels/annotations)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ns.outputs.namespace }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=php
+            org.opencontainers.image.description=Alpine-based multi-arch PHP images (${{ matrix.php }} / ${{ matrix.variant }})
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
       - name: Build & push (multi-arch)
+        id: buildpush
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -142,5 +175,263 @@ jobs:
             ${{ steps.tags.outputs.TAG_MOVING }}
             ${{ steps.tags.outputs.TAG_DATE }}
             ${{ steps.tags.outputs.TAG_SHA }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           provenance: false
           sbom: false
+          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+
+      - name: Trivy scan (SARIF)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
+          format: sarif
+          output: trivy-results.sarif
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Trivy scan (JSON for release/badges)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
+          format: json
+          output: trivy-results.json
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Trivy scan (HTML report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
+          format: template
+          template: "@/contrib/html.tpl"
+          output: trivy-report.html
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Write image + Trivy artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CRIT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+          MED=$(jq  '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results.json)
+
+          mkdir -p out
+
+          cat > "out/image-meta.txt" <<EOF
+          php=${{ matrix.php }}
+          variant=${{ matrix.variant }}
+          image_sha=${{ steps.tags.outputs.TAG_SHA }}
+          image_date=${{ steps.tags.outputs.TAG_DATE }}
+          image_moving=${{ steps.tags.outputs.TAG_MOVING }}
+          digest=${{ steps.buildpush.outputs.digest }}
+          EOF
+
+          cat > "out/trivy-summary.txt" <<EOF
+          php=${{ matrix.php }}
+          variant=${{ matrix.variant }}
+          image_sha=${{ steps.tags.outputs.TAG_SHA }}
+          digest=${{ steps.buildpush.outputs.digest }}
+          critical=${CRIT}
+          high=${HIGH}
+          medium=${MED}
+          EOF
+
+          cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-meta-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/image-meta.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-summary-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/trivy-summary.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
+          if-no-files-found: error
+
+  release:
+    needs: [matrix, build]
+    if: github.ref == 'refs/heads/main' && needs.matrix.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download image metadata artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-meta-*
+          path: artifacts/image-meta
+          merge-multiple: true
+
+      - name: Download Trivy summary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trivy-summary-*
+          path: artifacts/trivy
+          merge-multiple: true
+
+      - name: Download Trivy HTML report artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trivy-report-*
+          path: artifacts/trivy-html
+          merge-multiple: true
+
+      - name: Compose release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="images-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Built images"
+            echo ""
+            for f in artifacts/image-meta/*.txt; do
+              PHP=$(grep '^php=' "$f" | cut -d= -f2)
+              VARIANT=$(grep '^variant=' "$f" | cut -d= -f2)
+              IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
+              DIG=$(grep '^digest=' "$f" | cut -d= -f2)
+              DATE=$(grep '^image_date=' "$f" | cut -d= -f2)
+              MOV=$(grep '^image_moving=' "$f" | cut -d= -f2)
+
+              echo "- **${PHP}/${VARIANT}**"
+              echo "  - sha: \`${IMG}@${DIG}\`"
+              echo "  - date: \`${DATE}\`"
+              echo "  - moving: \`${MOV}\`"
+            done
+
+            echo ""
+            echo "## Trivy vulnerability summary (ignore-unfixed; CRITICAL/HIGH/MEDIUM)"
+            echo ""
+            echo "| Image (tag@digest) | CRITICAL | HIGH | MEDIUM |"
+            echo "|---|---:|---:|---:|"
+            for f in artifacts/trivy/*.txt; do
+              IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
+              DIG=$(grep '^digest=' "$f" | cut -d= -f2)
+              C=$(grep '^critical=' "$f" | cut -d= -f2)
+              H=$(grep '^high=' "$f" | cut -d= -f2)
+              M=$(grep '^medium=' "$f" | cut -d= -f2)
+              echo "| \`${IMG}@${DIG}\` | $C | $H | $M |"
+            done
+          } > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.notes.outputs.tag }}" \
+            --title "Container images ${{ steps.notes.outputs.tag }}" \
+            --notes-file release-notes.md
+
+      - name: Generate badge JSON files + prepare reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p badges reports
+
+          CRIT=0; HIGH=0; MED=0
+          COUNT=0
+
+          for f in artifacts/trivy/*.txt; do
+            PHP=$(grep '^php=' "$f" | cut -d= -f2)
+            VARIANT=$(grep '^variant=' "$f" | cut -d= -f2)
+            C=$(grep '^critical=' "$f" | cut -d= -f2)
+            H=$(grep '^high=' "$f" | cut -d= -f2)
+            M=$(grep '^medium=' "$f" | cut -d= -f2)
+
+            CRIT=$((CRIT + C))
+            HIGH=$((HIGH + H))
+            MED=$((MED + M))
+            COUNT=$((COUNT + 1))
+
+            COLOR="brightgreen"
+            if [ "$C" -gt 0 ]; then
+              COLOR="red"
+            elif [ "$H" -gt 0 ]; then
+              COLOR="orange"
+            elif [ "$M" -gt 0 ]; then
+              COLOR="yellow"
+            fi
+
+            cat > "badges/trivy-${PHP}-${VARIANT}.json" <<EOF
+          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
+          EOF
+
+            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VARIANT}.html" ]; then
+              cp "artifacts/trivy-html/trivy-${PHP}-${VARIANT}.html" "reports/trivy-${PHP}-${VARIANT}.html"
+            fi
+          done
+
+          TOTAL_COLOR="brightgreen"
+          if [ "$CRIT" -gt 0 ]; then
+            TOTAL_COLOR="red"
+          elif [ "$HIGH" -gt 0 ]; then
+            TOTAL_COLOR="orange"
+          elif [ "$MED" -gt 0 ]; then
+            TOTAL_COLOR="yellow"
+          fi
+
+          cat > badges/trivy-total.json <<EOF
+          {"schemaVersion":1,"label":"trivy","message":"C:${CRIT} H:${HIGH} M:${MED}","color":"${TOTAL_COLOR}"}
+          EOF
+
+          PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
+          [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
+          cat > badges/php.json <<EOF
+          {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
+          EOF
+
+          BUILT="$(date -u +%Y-%m-%d)"
+          cat > badges/built.json <<EOF
+          {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
+          EOF
+
+          cat > badges/images.json <<EOF
+          {"schemaVersion":1,"label":"images","message":"${COUNT}","color":"blue"}
+          EOF
+
+      - name: Publish badges + reports to 'badges' branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin badges || true
+
+          git checkout --orphan badges-tmp
+          rm -rf ./*
+          mkdir -p badges reports
+          cp -r badges ./badges
+          cp -r reports ./reports
+          git add badges reports
+
+          git commit -m "chore(badges): update" || true
+
+          git branch -M badges
+          git push -f origin badges

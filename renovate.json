@@ -1,0 +1,63 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended"
+    ],
+    "timezone": "Europe/Warsaw",
+    "labels": [
+        "dependencies"
+    ],
+    "dependencyDashboard": true,
+    "dockerfile": {
+        "enabled": true
+    },
+    "packageRules": [
+        {
+            "description": "Upgrade base OS/runtime images",
+            "matchManagers": [
+                "dockerfile"
+            ],
+            "groupName": "base images"
+        },
+        {
+            "description": "Keep PHP version line stable",
+            "matchManagers": [
+                "dockerfile"
+            ],
+            "matchDepNames": [
+                "php"
+            ],
+            "matchUpdateTypes": [
+                "major",
+                "minor"
+            ],
+            "enabled": false
+        },
+        {
+            "description": "Upgrade Alpine base OS version used by PHP images",
+            "matchManagers": [
+                "regex"
+            ],
+            "matchDepNames": [
+                "alpine"
+            ],
+            "allowedVersions": "^3\\.",
+            "groupName": "alpine base os"
+        }
+    ],
+    "customManagers": [
+        {
+            "customType": "regex",
+            "description": "Track Alpine version embedded in php:<php>-<variant>-alpine<alpine> in Dockerfiles",
+            "fileMatch": [
+                "^versions/[^/]+/[^/]+/Dockerfile$"
+            ],
+            "matchStrings": [
+                "FROM\\s+php:(?<phpVersion>\\d+\\.\\d+(?:\\.\\d+)?)-(?:cli|fpm)-alpine(?<currentValue>\\d+\\.\\d+)"
+            ],
+            "depNameTemplate": "alpine",
+            "datasourceTemplate": "docker",
+            "versioningTemplate": "semver"
+        }
+    ]
+}

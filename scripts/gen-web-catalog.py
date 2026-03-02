@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
+import html
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-IMAGE_NAME = "php-base-images"
+
+REPO = "rafalmasiarek/php-images"
+BADGES_BRANCH = "badges"
+
+# This is the package name used by build.yml (ghcr.io/<owner>/php)
+IMAGE_NAME = "php"
 
 
 def load_pecl(dirpath: Path) -> list[str]:
@@ -18,32 +26,188 @@ def load_pecl(dirpath: Path) -> list[str]:
     return out
 
 
-rows: list[tuple[str, str, str, str]] = []
+def detect_alpine(dockerfile: Path) -> str:
+    """
+    Tries to detect Alpine version from Dockerfile FROM line.
+    Supports:
+      - alpine:3.20
+      - php:8.x-alpine3.20
+    """
+    txt = dockerfile.read_text(encoding="utf-8", errors="replace")
+    from_line = ""
+    for line in txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.upper().startswith("FROM "):
+            from_line = line
+            break
+    if not from_line:
+        return "unknown"
+
+    m = re.search(r"\balpine:(\d+(?:\.\d+)*)\b", from_line)
+    if m:
+        return m.group(1)
+
+    m = re.search(r"\balpine(\d+(?:\.\d+)*)\b", from_line)
+    if m:
+        return m.group(1)
+
+    return "unknown"
+
+
+def badge_img(url: str, alt: str) -> str:
+    return f'<img src="{html.escape(url)}" alt="{html.escape(alt)}" loading="lazy" />'
+
+
+def endpoint_badge(name: str) -> str:
+    # badges/<name>.json on badges branch
+    url = (
+        "https://img.shields.io/endpoint"
+        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/{name}.json"
+    )
+    return badge_img(url, name)
+
+
+def trivy_badge(php: str, variant: str) -> str:
+    # badges/trivy-<php>-<variant>.json on badges branch
+    url = (
+        "https://img.shields.io/endpoint"
+        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/trivy-{php}-{variant}.json"
+    )
+    return badge_img(url, f"trivy {php}-{variant}")
+
+
+def trivy_report_link(php: str, variant: str) -> str:
+    # reports/trivy-<php>-<variant>.html on badges branch
+    url = f"https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/reports/trivy-{php}-{variant}.html"
+    return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">HTML report</a>'
+
+
+def workflow_badge() -> str:
+    url = f"https://github.com/{REPO}/actions/workflows/build.yml/badge.svg?branch=main"
+    return badge_img(url, "build")
+
+
+def release_badge() -> str:
+    url = f"https://img.shields.io/github/v/release/{REPO}?display_name=tag"
+    return badge_img(url, "release")
+
+
+def license_badge() -> str:
+    url = f"https://img.shields.io/github/license/{REPO}"
+    return badge_img(url, "license")
+
+
+# Collect info: php -> variant -> info
+data: dict[str, dict[str, dict[str, object]]] = {}
+
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     php = dockerfile.parts[-3]
     variant = dockerfile.parts[-2]
     prefix = f"{php}-{variant}"
-    pecl = ", ".join(load_pecl(dockerfile.parent)) or "-"
-    rows.append((php, variant, prefix, pecl))
+    pecl_list = load_pecl(dockerfile.parent)
+    alpine = detect_alpine(dockerfile)
 
-rows.sort(key=lambda r: (r[0], r[1]))
+    data.setdefault(php, {})
+    data[php][variant] = {
+        "prefix": prefix,
+        "pecl": pecl_list,
+        "alpine": alpine,
+    }
 
-html: list[str] = []
-html.append("<h2>Images</h2>")
-html.append("<p>Generated from <code>versions/</code> during CI build.</p>")
-html.append("<table>")
-html.append("<thead><tr><th>PHP</th><th>Variant</th><th>Tag prefix</th><th>PECL (declared)</th></tr></thead>")
-html.append("<tbody>")
-for php, variant, prefix, pecl in rows:
-    html.append("<tr>")
-    html.append(f"<td>{php}</td>")
-    html.append(f"<td>{variant}</td>")
-    html.append(f"<td><code>{prefix}</code></td>")
-    html.append(f"<td>{pecl}</td>")
-    html.append("</tr>")
-html.append("</tbody></table>")
+
+def php_key(s: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in s.split("."))
+    except Exception:
+        return (0,)
+
+
+# Build HTML
+html_out: list[str] = []
+
+html_out.append("<h2>Catalog</h2>")
+html_out.append("<p>Generated from <code>versions/</code> during CI build.</p>")
+
+html_out.append('<div class="badges">')
+html_out.append(workflow_badge())
+html_out.append(release_badge())
+html_out.append(license_badge())
+html_out.append("</div>")
+
+html_out.append('<div class="badges">')
+html_out.append(endpoint_badge("trivy-total"))
+html_out.append(endpoint_badge("php"))
+html_out.append(endpoint_badge("built"))
+html_out.append(endpoint_badge("images"))
+html_out.append("</div>")
+
+html_out.append("<h3>Tag scheme</h3>")
+html_out.append("<ul>")
+html_out.append("<li><code>&lt;php&gt;-&lt;variant&gt;</code> — moving tag (latest for that variant)</li>")
+html_out.append("<li><code>&lt;php&gt;-&lt;variant&gt;-YYYY-MM-DD</code> — date tag</li>")
+html_out.append("<li><code>&lt;php&gt;-&lt;variant&gt;-sha-&lt;gitsha7&gt;</code> — immutable tag</li>")
+html_out.append("</ul>")
+
+html_out.append("<h3>Images</h3>")
+html_out.append("<table>")
+html_out.append(
+    "<thead><tr>"
+    "<th>PHP</th>"
+    "<th>Variants</th>"
+    "<th>Tags</th>"
+    "<th>Alpine</th>"
+    "<th>PECL (declared)</th>"
+    "<th>Security</th>"
+    "</tr></thead>"
+)
+html_out.append("<tbody>")
+
+for php in sorted(data.keys(), key=php_key):
+    variants = data[php]
+    variant_names = sorted(variants.keys())
+
+    # Build multi-line cells (one line per variant)
+    variants_cell = "<br>".join(f"<code>{html.escape(v)}</code>" for v in variant_names)
+
+    tags_cell_lines: list[str] = []
+    alpine_cell_lines: list[str] = []
+    pecl_cell_lines: list[str] = []
+    sec_cell_lines: list[str] = []
+
+    for v in variant_names:
+        prefix = str(variants[v]["prefix"])
+        alpine = str(variants[v]["alpine"])
+        pecls = variants[v]["pecl"]
+        pecl_str = ", ".join(pecls) if pecls else "-"
+
+        tags_cell_lines.append(
+            f"<strong>{html.escape(v)}</strong>: "
+            f"<code>{html.escape(prefix)}</code>, "
+            f"<code>{html.escape(prefix)}-YYYY-MM-DD</code>, "
+            f"<code>{html.escape(prefix)}-sha-&lt;gitsha7&gt;</code>"
+        )
+        alpine_cell_lines.append(f"<strong>{html.escape(v)}</strong>: <code>{html.escape(alpine)}</code>")
+        pecl_cell_lines.append(f"<strong>{html.escape(v)}</strong>: {html.escape(pecl_str)}")
+        sec_cell_lines.append(
+            f"<strong>{html.escape(v)}</strong>: "
+            f"{trivy_badge(php, v)} "
+            f"({trivy_report_link(php, v)})"
+        )
+
+    html_out.append("<tr>")
+    html_out.append(f"<td><code>{html.escape(php)}</code></td>")
+    html_out.append(f"<td>{variants_cell}</td>")
+    html_out.append(f"<td>{'<br>'.join(tags_cell_lines)}</td>")
+    html_out.append(f"<td>{'<br>'.join(alpine_cell_lines)}</td>")
+    html_out.append(f"<td>{'<br>'.join(pecl_cell_lines)}</td>")
+    html_out.append(f"<td>{'<br>'.join(sec_cell_lines)}</td>")
+    html_out.append("</tr>")
+
+html_out.append("</tbody></table>")
 
 out = ROOT / "web" / "_includes" / "generated-table.html"
 out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text("\n".join(html) + "\n", encoding="utf-8")
+out.write_text("\n".join(html_out) + "\n", encoding="utf-8")
 print(f"Wrote {out}")
