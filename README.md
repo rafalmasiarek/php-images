@@ -1,6 +1,6 @@
 # php
 
-Multi-arch (amd64+arm64) Alpine-based PHP images.
+Multi-arch Alpine-based PHP images
 
 ![build](https://github.com/rafalmasiarek/php-images/actions/workflows/build.yml/badge.svg?branch=main)
 ![release](https://img.shields.io/github/v/release/rafalmasiarek/php-images?display_name=tag)
@@ -17,8 +17,8 @@ Multi-arch (amd64+arm64) Alpine-based PHP images.
 
 | PHP | Tags | Alpine | PECL modules (declared) | Trivy |
 | - | - | - | - | - |
-| `8.2` | **cli**: `8.2-cli`, `8.2-cli-YYYY-MM-DD`, `8.2-cli-sha-<gitsha7>`<br>**fpm**: `8.2-fpm`, `8.2-fpm-YYYY-MM-DD`, `8.2-fpm-sha-<gitsha7>` | **cli**: `3.20`<br>**fpm**: `3.20` | **cli**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov<br>**fpm**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov | **cli**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.2-cli.json)<br>**fpm**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.2-fpm.json) |
-| `8.3` | **cli**: `8.3-cli`, `8.3-cli-YYYY-MM-DD`, `8.3-cli-sha-<gitsha7>`<br>**fpm**: `8.3-fpm`, `8.3-fpm-YYYY-MM-DD`, `8.3-fpm-sha-<gitsha7>` | **cli**: `3.20`<br>**fpm**: `3.20` | **cli**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov<br>**fpm**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov | **cli**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.3-cli.json)<br>**fpm**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.3-fpm.json) |
+| `8.2` | **cli**: `8.2-cli`<br>**fpm**: `8.2-fpm` | **cli**: `3.22`<br>**fpm**: `3.22` | **cli**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov<br>**fpm**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov | **cli**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.2-cli.json)<br>**fpm**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.2-fpm.json) |
+| `8.3` | **cli**: `8.3-cli`<br>**fpm**: `8.3-fpm` | **cli**: `3.22`<br>**fpm**: `3.22` | **cli**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov<br>**fpm**: redis, apcu, mongodb, msgpack, mailparse, xdebug, imagick, memcached, amqp, ssh2, ast, ds, pcov | **cli**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.3-cli.json)<br>**fpm**: ![trivy](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.3-fpm.json) |
 
 ---
 
