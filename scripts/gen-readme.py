@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE_NAME = "php"
 REPO = "rafalmasiarek/php-images"
 BADGES_BRANCH = "badges"
+GHCR_IMAGE = "ghcr.io/rafalmasiarek/php"
 
 
 def load_pecl_list(dirpath: Path) -> list[str]:
@@ -45,12 +46,10 @@ def detect_alpine(dockerfile: Path) -> str:
     if not from_line:
         return "unknown"
 
-    # alpine:3.20
     m = re.search(r"\balpine:(\d+(?:\.\d+)*)\b", from_line)
     if m:
         return m.group(1)
 
-    # ...alpine3.20...
     m = re.search(r"\balpine(\d+(?:\.\d+)*)\b", from_line)
     if m:
         return m.group(1)
@@ -59,8 +58,6 @@ def detect_alpine(dockerfile: Path) -> str:
 
 
 def trivy_badge(php: str, variant: str) -> str:
-    # Example:
-    # https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rafalmasiarek/php-images/badges/badges/trivy-8.3-cli.json
     url = (
         "https://img.shields.io/endpoint"
         f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/trivy-{php}-{variant}.json"
@@ -69,7 +66,6 @@ def trivy_badge(php: str, variant: str) -> str:
 
 
 def endpoint_badge(name: str) -> str:
-    # badges/<name>.json published to badges branch
     url = (
         "https://img.shields.io/endpoint"
         f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/{name}.json"
@@ -95,11 +91,11 @@ data: dict[str, dict[str, dict[str, object]]] = {}
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     php = dockerfile.parts[-3]
     variant = dockerfile.parts[-2]
-    prefix = f"{php}-{variant}"
+    tag = f"{php}-{variant}"
 
     data.setdefault(php, {})
     data[php][variant] = {
-        "prefix": prefix,
+        "tag": tag,
         "pecl": load_pecl_list(dockerfile.parent),
         "alpine": detect_alpine(dockerfile),
     }
@@ -113,21 +109,19 @@ table = [
 for php in sorted(data.keys(), key=lambda s: tuple(int(x) for x in s.split("."))):
     variants = data[php]
 
-    # stable tag patterns (do not embed actual sha/date)
     tags_lines: list[str] = []
     alpine_lines: list[str] = []
     pecl_lines: list[str] = []
     trivy_lines: list[str] = []
 
     for variant in sorted(variants.keys()):
-        prefix = str(variants[variant]["prefix"])
+        tag = str(variants[variant]["tag"])
         alpine = str(variants[variant]["alpine"])
         pecls = variants[variant]["pecl"]
         pecl_str = ", ".join(pecls) if pecls else "-"
 
-        tags_lines.append(
-            f"**{variant}**: `{prefix}`, `{prefix}-YYYY-MM-DD`, `{prefix}-sha-<gitsha7>`"
-        )
+        # ONLY the moving tag (no date/sha patterns)
+        tags_lines.append(f"**{variant}**: `{tag}`")
         alpine_lines.append(f"**{variant}**: `{alpine}`")
         pecl_lines.append(f"**{variant}**: {pecl_str}")
         trivy_lines.append(f"**{variant}**: {trivy_badge(php, variant)}")
@@ -150,14 +144,12 @@ readme = "\n".join(
     [
         f"# {IMAGE_NAME}",
         "",
-        "Multi-arch (amd64+arm64) Alpine-based PHP images.",
+        "Multi-arch Alpine-based PHP images",
         "",
-        # Top badges (static)
         workflow_badge(),
         release_badge(),
         license_badge(),
         "",
-        # Dynamic badges from badges branch
         endpoint_badge("trivy-total"),
         endpoint_badge("php"),
         endpoint_badge("built"),

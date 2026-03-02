@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM php:8.2-cli-alpine3.20 AS builder
+FROM php:8.2.30-cli-alpine3.22 AS builder
 
 ARG PECL_FILE=pecl.txt
 
@@ -57,7 +57,7 @@ RUN set -eux; \
     \
     apk del .build-deps
 
-FROM php:8.2-cli-alpine3.20 AS runtime
+FROM php:88.2.30-cli-alpine3.22 AS runtime
 
 RUN set -eux; \
     apk add --no-cache \
