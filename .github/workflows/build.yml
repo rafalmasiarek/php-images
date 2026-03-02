@@ -250,19 +250,19 @@ jobs:
 
           cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image-meta-${{ matrix.php }}-${{ matrix.variant }}
           path: out/image-meta.txt
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: trivy-summary-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-summary.txt
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
