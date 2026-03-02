@@ -13,10 +13,9 @@ RUN apk add --no-cache \
     freetype-dev libpng-dev libjpeg-turbo-dev gettext-dev
 
 RUN apk add --no-cache \
-    openldap-dev imap-dev krb5-dev net-snmp-dev unixodbc-dev \
+    openldap-dev imap-dev krb5-dev net-snmp-dev unixodbc unixodbc-dev \
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
-    imagemagick-dev imagemagick \
-    || true
+    imagemagick-dev imagemagick 
 
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg
 RUN if apk info -e imap-dev; then docker-php-ext-configure imap --with-kerberos --with-imap-ssl; fi
