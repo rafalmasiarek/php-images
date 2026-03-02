@@ -57,7 +57,7 @@ RUN set -eux; \
     \
     apk del .build-deps
 
-FROM php:88.2.30-cli-alpine3.22 AS runtime
+FROM php:8.2.30-cli-alpine3.22 AS runtime
 
 RUN set -eux; \
     apk add --no-cache \
