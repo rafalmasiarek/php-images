@@ -10,7 +10,7 @@ RUN set -eux; \
     icu-dev libzip-dev zlib-dev bzip2-dev curl-dev openssl-dev oniguruma-dev \
     sqlite-dev postgresql-dev libxml2-dev libxslt-dev tidyhtml-dev gmp-dev \
     freetype-dev libpng-dev libjpeg-turbo-dev gettext-dev \
-    openldap-dev imap-dev krb5-dev net-snmp-dev unixodbc unixodbc-dev \
+    openldap-dev imap-dev krb5-dev net-snmp-dev\
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
     imagemagick-dev imagemagick \
     ; \
@@ -18,7 +18,6 @@ RUN set -eux; \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
     docker-php-ext-configure imap --with-kerberos --with-imap-ssl; \
     docker-php-ext-configure ldap; \
-    docker-php-ext-configure odbc --with-unixODBC=/usr; \
     \
     docker-php-ext-install -j"$(nproc)" \
     bcmath bz2 calendar \
@@ -30,7 +29,7 @@ RUN set -eux; \
     pgsql \
     soap sockets \
     tidy xsl zip \
-    snmp imap ldap odbc \
+    snmp imap ldap \
     ; \
     \
     pecl channel-update pecl.php.net; \
@@ -74,7 +73,7 @@ RUN set -eux; \
     icu-libs libzip zlib bzip2 curl openssl oniguruma \
     sqlite-libs postgresql-libs libxml2 libxslt tidyhtml gmp \
     freetype libpng libjpeg-turbo gettext \
-    openldap cyrus-sasl krb5 net-snmp-libs unixodbc \
+    openldap cyrus-sasl krb5 net-snmp-libs \
     rabbitmq-c libssh2 libmemcached imagemagick
 
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
