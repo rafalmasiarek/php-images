@@ -278,21 +278,21 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Download image metadata artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: image-meta-*
           path: artifacts/image-meta
           merge-multiple: true
 
       - name: Download Trivy summary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: trivy-summary-*
           path: artifacts/trivy
           merge-multiple: true
 
       - name: Download Trivy HTML report artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: trivy-report-*
           path: artifacts/trivy-html
