@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.21
 FROM php:8.2.30-fpm-alpine3.22 AS builder
 
 ARG PECL_FILE=pecl.txt
