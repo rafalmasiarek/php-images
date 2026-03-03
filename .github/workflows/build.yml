@@ -419,18 +419,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin badges || true
+          # Zachowaj wygenerowane pliki zanim wyczyścisz repo
+          rm -rf .publish
+          mkdir -p .publish
+          if [ -d badges ]; then
+            cp -r badges .publish/badges
+          else
+            mkdir -p .publish/badges
+          fi
+          if [ -d reports ]; then
+            cp -r reports .publish/reports
+          else
+            mkdir -p .publish/reports
+          fi
 
+          # Utwórz "czystą" gałąź z tylko badges/ i reports/
           git checkout --orphan badges-tmp
           rm -rf ./*
-          mkdir -p badges reports
-          cp -r badges ./badges
-          cp -r reports ./reports
-          git add badges reports
 
+          mkdir -p badges reports
+          cp -r .publish/badges/* badges/ 2>/dev/null || true
+          cp -r .publish/reports/* reports/ 2>/dev/null || true
+
+          git add badges reports
           git commit -m "chore(badges): update" || true
 
           git branch -M badges
