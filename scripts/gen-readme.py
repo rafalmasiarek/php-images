@@ -91,12 +91,20 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
         "alpine": detect_alpine(dockerfile),
     }
 
+
+def php_key(s: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in s.split("."))
+    except Exception:
+        return (0,)
+
+
 table = [
     "| PHP | Tags | Alpine | PECL modules (declared) | Trivy |",
     "| - | - | - | - | - |",
 ]
 
-for php in sorted(data.keys(), key=lambda s: tuple(int(x) for x in s.split("."))):
+for php in sorted(data.keys(), key=php_key):
     variants = data[php]
 
     tags_lines: list[str] = []
