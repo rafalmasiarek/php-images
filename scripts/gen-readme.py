@@ -14,18 +14,6 @@ GHCR_IMAGE = "ghcr.io/rafalmasiarek/php"
 SITE_BASE_URL = "https://php-images.masiarek.dev"
 
 
-def load_pecl_list(dirpath: Path) -> list[str]:
-    p = dirpath / "pecl.txt"
-    if not p.exists():
-        return []
-    out: list[str] = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            out.append(line)
-    return out
-
-
 def detect_alpine(dockerfile: Path) -> str:
     txt = dockerfile.read_text(encoding="utf-8", errors="replace")
     from_line = ""
@@ -69,15 +57,29 @@ def workflow_badge() -> str:
     return f"![build](https://github.com/{REPO}/actions/workflows/build.yml/badge.svg?branch=main)"
 
 
-def release_badge() -> str:
-    return f"![release](https://img.shields.io/github/v/release/{REPO}?display_name=tag)"
-
-
 def license_badge() -> str:
     return f"![license](https://img.shields.io/github/license/{REPO})"
 
 
-data: dict[str, dict[str, dict[str, object]]] = {}
+def os_badge(os_version: str) -> str:
+    """
+    Static shields badge that links to Docker Hub layers page:
+    https://hub.docker.com/layers/library/alpine/X.XX
+    """
+    if not os_version or os_version == "unknown":
+        # fallback (no link)
+        badge = "https://img.shields.io/badge/alpine-unknown-lightgrey"
+        return f"![alpine]({badge})"
+
+    label = "alpine"
+    message = f"v{os_version}"
+    # Use shields static badge; encode message safely
+    badge = "https://img.shields.io/badge/" + quote(f"{label}-{message}", safe="")
+    link = f"https://hub.docker.com/layers/library/alpine/{os_version}"
+    return f"[![alpine]({badge})]({link})"
+
+
+data: dict[str, dict[str, dict[str, str]]] = {}
 
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     php = dockerfile.parts[-3]
@@ -87,8 +89,7 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     data.setdefault(php, {})
     data[php][variant] = {
         "tag": tag,
-        "pecl": load_pecl_list(dockerfile.parent),
-        "alpine": detect_alpine(dockerfile),
+        "os": detect_alpine(dockerfile),
     }
 
 
@@ -100,27 +101,23 @@ def php_key(s: str) -> tuple[int, ...]:
 
 
 table = [
-    "| PHP | Tags | Alpine | PECL modules (declared) | Trivy |",
-    "| - | - | - | - | - |",
+    "| PHP | Tags | OS | Trivy |",
+    "| - | - | - | - |",
 ]
 
 for php in sorted(data.keys(), key=php_key):
     variants = data[php]
 
     tags_lines: list[str] = []
-    alpine_lines: list[str] = []
-    pecl_lines: list[str] = []
+    os_lines: list[str] = []
     trivy_lines: list[str] = []
 
     for variant in sorted(variants.keys()):
-        tag = str(variants[variant]["tag"])
-        alpine = str(variants[variant]["alpine"])
-        pecls = variants[variant]["pecl"]
-        pecl_str = ", ".join(pecls) if pecls else "-"
+        tag = variants[variant]["tag"]
+        os_ver = variants[variant]["os"]
 
         tags_lines.append(f"**{variant}**: `{tag}`")
-        alpine_lines.append(f"**{variant}**: `{alpine}`")
-        pecl_lines.append(f"**{variant}**: {pecl_str}")
+        os_lines.append(f"**{variant}**: {os_badge(os_ver)}")
         trivy_lines.append(f"**{variant}**: {trivy_badge(php, variant)}")
 
     table.append(
@@ -129,9 +126,7 @@ for php in sorted(data.keys(), key=php_key):
         + " | "
         + "<br>".join(tags_lines)
         + " | "
-        + "<br>".join(alpine_lines)
-        + " | "
-        + "<br>".join(pecl_lines)
+        + "<br>".join(os_lines)
         + " | "
         + "<br>".join(trivy_lines)
         + " |"
@@ -144,13 +139,10 @@ readme = "\n".join(
         "Multi-arch Alpine-based PHP images",
         "",
         workflow_badge(),
-        release_badge(),
         license_badge(),
         "",
         endpoint_badge("trivy-total"),
-        endpoint_badge("php"),
         endpoint_badge("built"),
-        endpoint_badge("images"),
         "",
         "---",
         "",
