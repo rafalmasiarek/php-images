@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# This is the GHCR package name (ghcr.io/<owner>/php)
 IMAGE_NAME = "php"
 REPO = "rafalmasiarek/php-images"
-BADGES_BRANCH = "badges"
 GHCR_IMAGE = "ghcr.io/rafalmasiarek/php"
+
+SITE_BASE_URL = "https://php-images.masiarek.dev"
 
 
 def load_pecl_list(dirpath: Path) -> list[str]:
@@ -26,14 +27,6 @@ def load_pecl_list(dirpath: Path) -> list[str]:
 
 
 def detect_alpine(dockerfile: Path) -> str:
-    """
-    Tries to detect Alpine version from a Dockerfile by parsing the first FROM line.
-    Supports:
-      - alpine:3.20
-      - php:8.x-alpine3.20
-      - ...alpine3.20...
-    Returns "unknown" if not detected.
-    """
     txt = dockerfile.read_text(encoding="utf-8", errors="replace")
     from_line = ""
     for line in txt.splitlines():
@@ -57,20 +50,19 @@ def detect_alpine(dockerfile: Path) -> str:
     return "unknown"
 
 
+def shields_endpoint_md(endpoint_url: str, alt: str) -> str:
+    url = "https://img.shields.io/endpoint?url=" + quote(endpoint_url, safe="")
+    return f"![{alt}]({url})"
+
+
 def trivy_badge(php: str, variant: str) -> str:
-    url = (
-        "https://img.shields.io/endpoint"
-        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/trivy-{php}-{variant}.json"
-    )
-    return f"![trivy]({url})"
+    endpoint_url = f"{SITE_BASE_URL}/badges/trivy-{php}-{variant}.json"
+    return shields_endpoint_md(endpoint_url, "trivy")
 
 
 def endpoint_badge(name: str) -> str:
-    url = (
-        "https://img.shields.io/endpoint"
-        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/{name}.json"
-    )
-    return f"![{name}]({url})"
+    endpoint_url = f"{SITE_BASE_URL}/badges/{name}.json"
+    return shields_endpoint_md(endpoint_url, name)
 
 
 def workflow_badge() -> str:
@@ -85,7 +77,6 @@ def license_badge() -> str:
     return f"![license](https://img.shields.io/github/license/{REPO})"
 
 
-# Collect data: php -> variant -> info
 data: dict[str, dict[str, dict[str, object]]] = {}
 
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
@@ -100,7 +91,6 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
         "alpine": detect_alpine(dockerfile),
     }
 
-# Build table: one row per PHP version, variants rendered with <br>
 table = [
     "| PHP | Tags | Alpine | PECL modules (declared) | Trivy |",
     "| - | - | - | - | - |",
@@ -120,7 +110,6 @@ for php in sorted(data.keys(), key=lambda s: tuple(int(x) for x in s.split("."))
         pecls = variants[variant]["pecl"]
         pecl_str = ", ".join(pecls) if pecls else "-"
 
-        # ONLY the moving tag (no date/sha patterns)
         tags_lines.append(f"**{variant}**: `{tag}`")
         alpine_lines.append(f"**{variant}**: `{alpine}`")
         pecl_lines.append(f"**{variant}**: {pecl_str}")
@@ -162,6 +151,20 @@ readme = "\n".join(
         *table,
         "",
         "---",
+        "",
+        "## Pulling images",
+        "",
+        f"All images are published to `{GHCR_IMAGE}`.",
+        "",
+        "Tag scheme:",
+        "",
+        "- `<php>-<variant>` (moving)",
+        "- `<php>-<variant>-YYYY-MM-DD` (date)",
+        "- `<php>-<variant>-sha-<gitsha7>` (immutable)",
+        "",
+        "## Trivy reports",
+        "",
+        f"- HTML reports: {SITE_BASE_URL}/reports/",
         "",
         "## Install one more extension on top of an image",
         "",
