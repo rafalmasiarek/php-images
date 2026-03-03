@@ -478,12 +478,17 @@ jobs:
               --notes-file "$NOTES"
           done
 
-      - name: Update web badges and reports (commit to main)
+      - name: Update web badges and reports
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p web/badges web/reports
+
+          # Totals computed from trivy summary artifacts (not from badge JSON)
+          TOTAL_C=0
+          TOTAL_H=0
+          TOTAL_M=0
 
           for f in artifacts/trivy/*.txt; do
             [ -e "$f" ] || continue
@@ -494,6 +499,15 @@ jobs:
             H=$(grep '^high=' "$f" | cut -d= -f2)
             M=$(grep '^medium=' "$f" | cut -d= -f2)
 
+            # Defensive defaults
+            C=${C:-0}
+            H=${H:-0}
+            M=${M:-0}
+
+            TOTAL_C=$((TOTAL_C + C))
+            TOTAL_H=$((TOTAL_H + H))
+            TOTAL_M=$((TOTAL_M + M))
+
             COLOR="brightgreen"
             if [ "$C" -gt 0 ]; then
               COLOR="red"
@@ -503,18 +517,20 @@ jobs:
               COLOR="yellow"
             fi
 
+            # Shields endpoint schema: do NOT add custom properties here
             cat > "web/badges/trivy-${PHP}-${VAR}.json" <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}","critical":${C},"high":${H},"medium":${M},"php":"${PHP}","variant":"${VAR}"}
+          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
+          EOF
+
+            # Optional: keep machine-readable data in a separate file (NOT used by Shields)
+            cat > "web/badges/trivy-${PHP}-${VAR}.data.json" <<EOF
+          {"php":"${PHP}","variant":"${VAR}","critical":${C},"high":${H},"medium":${M}}
           EOF
 
             if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
               cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
             fi
           done
-
-          TOTAL_C=$(jq -s '[.[].critical] | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
-          TOTAL_H=$(jq -s '[.[].high]     | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
-          TOTAL_M=$(jq -s '[.[].medium]   | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
 
           TOTAL_COLOR="brightgreen"
           if [ "$TOTAL_C" -gt 0 ]; then
@@ -525,8 +541,14 @@ jobs:
             TOTAL_COLOR="yellow"
           fi
 
+          # Shields endpoint schema: do NOT add custom properties here
           cat > web/badges/trivy-total.json <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}","critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
+          {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}"}
+          EOF
+
+          # Optional: machine-readable totals (NOT used by Shields)
+          cat > web/badges/trivy-total.data.json <<EOF
+          {"critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
           EOF
 
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
@@ -540,7 +562,8 @@ jobs:
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
 
-          IMAGES_COUNT=$(ls -1 web/badges/trivy-*.json 2>/dev/null | wc -l | tr -d ' ')
+          # Count only actual badge JSONs, exclude totals and *.data.json
+          IMAGES_COUNT=$(ls -1 web/badges/trivy-*.json 2>/dev/null | grep -v 'trivy-total\.json' | wc -l | tr -d ' ')
           cat > web/badges/images.json <<EOF
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
