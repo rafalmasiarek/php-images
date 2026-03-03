@@ -1,0 +1,116 @@
+<div class="table-controls">
+  <input id="table-search" type="search" placeholder="Search (php, variant, tag, sha)..." autocomplete="off" />
+  <label>
+    Rows:
+    <select id="table-page-size">
+      <option>10</option>
+      <option selected>25</option>
+      <option>50</option>
+      <option>100</option>
+    </select>
+  </label>
+
+  <div class="table-pager">
+    <button id="table-prev" type="button">Prev</button>
+    <span id="table-status">Page 1/1</span>
+    <button id="table-next" type="button">Next</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const table = document.getElementById('images-table');
+  if (!table) return;
+
+  const tbody = table.tBodies[0];
+  const allRows = Array.from(tbody.rows);
+
+  const searchEl = document.getElementById('table-search');
+  const pageSizeEl = document.getElementById('table-page-size');
+  const prevEl = document.getElementById('table-prev');
+  const nextEl = document.getElementById('table-next');
+  const statusEl = document.getElementById('table-status');
+
+  let query = '';
+  let pageSize = parseInt(pageSizeEl.value, 10) || 25;
+  let page = 1;
+
+  const norm = (s) => (s || '').toLowerCase().trim();
+
+  function getFilteredRows() {
+    const q = norm(query);
+    if (!q) return allRows;
+    return allRows.filter(row => norm(row.innerText).includes(q));
+  }
+
+  function render() {
+    const rows = getFilteredRows();
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+
+    page = Math.min(page, pages);
+    page = Math.max(page, 1);
+
+    // hide all
+    allRows.forEach(r => { r.style.display = 'none'; });
+
+    // show current page
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    rows.slice(start, end).forEach(r => { r.style.display = ''; });
+
+    statusEl.textContent = `Page ${page}/${pages} · ${total} rows`;
+    prevEl.disabled = page <= 1;
+    nextEl.disabled = page >= pages;
+  }
+
+  searchEl.addEventListener('input', () => {
+    query = searchEl.value;
+    page = 1;
+    render();
+  });
+
+  pageSizeEl.addEventListener('change', () => {
+    pageSize = parseInt(pageSizeEl.value, 10) || 25;
+    page = 1;
+    render();
+  });
+
+  prevEl.addEventListener('click', () => {
+    page -= 1;
+    render();
+  });
+
+  nextEl.addEventListener('click', () => {
+    page += 1;
+    render();
+  });
+
+  render();
+})();
+</script>
+
+<style>
+.table-controls{
+  display:flex;
+  flex-wrap:wrap;
+  gap:12px;
+  align-items:center;
+  margin:12px 0 16px;
+}
+.table-controls input[type="search"]{
+  min-width:260px;
+  padding:6px 10px;
+}
+.table-controls select{
+  padding:6px 8px;
+}
+.table-pager{
+  display:flex;
+  gap:8px;
+  align-items:center;
+}
+.table-pager button{
+  padding:6px 10px;
+}
+</style>
