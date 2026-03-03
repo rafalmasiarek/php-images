@@ -212,6 +212,7 @@ jobs:
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
           format: template
+          template: "@$HOME/.local/bin/trivy-bin/contrib/html.tpl"
           output: trivy-report.html
           vuln-type: os,library
           severity: CRITICAL,HIGH,MEDIUM
