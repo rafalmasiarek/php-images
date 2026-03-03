@@ -4,11 +4,14 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 
 REPO = "rafalmasiarek/php-images"
-BADGES_BRANCH = "badges"
+
+# Public site base URL (GitHub Pages via Deployments / Jekyll)
+SITE_BASE_URL = "https://php-images.masiarek.dev"
 
 # This is the package name used by build.yml (ghcr.io/<owner>/php)
 IMAGE_NAME = "php"
@@ -60,27 +63,24 @@ def badge_img(url: str, alt: str) -> str:
     return f'<img src="{html.escape(url)}" alt="{html.escape(alt)}" loading="lazy" />'
 
 
+def shields_endpoint_badge(endpoint_url: str, alt: str) -> str:
+    # Shields expects the endpoint URL to be URL-encoded
+    shields = "https://img.shields.io/endpoint?url=" + quote(endpoint_url, safe="")
+    return badge_img(shields, alt)
+
+
 def endpoint_badge(name: str) -> str:
-    # badges/<name>.json on badges branch
-    url = (
-        "https://img.shields.io/endpoint"
-        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/{name}.json"
-    )
-    return badge_img(url, name)
+    endpoint_url = f"{SITE_BASE_URL}/badges/{name}.json"
+    return shields_endpoint_badge(endpoint_url, name)
 
 
 def trivy_badge(php: str, variant: str) -> str:
-    # badges/trivy-<php>-<variant>.json on badges branch
-    url = (
-        "https://img.shields.io/endpoint"
-        f"?url=https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/badges/trivy-{php}-{variant}.json"
-    )
-    return badge_img(url, f"trivy {php}-{variant}")
+    endpoint_url = f"{SITE_BASE_URL}/badges/trivy-{php}-{variant}.json"
+    return shields_endpoint_badge(endpoint_url, f"trivy {php}-{variant}")
 
 
 def trivy_report_link(php: str, variant: str) -> str:
-    # reports/trivy-<php>-<variant>.html on badges branch
-    url = f"https://raw.githubusercontent.com/{REPO}/{BADGES_BRANCH}/reports/trivy-{php}-{variant}.html"
+    url = f"{SITE_BASE_URL}/reports/trivy-{php}-{variant}.html"
     return f'<a href="{html.escape(url)}" target="_blank" rel="noopener">HTML report</a>'
 
 
@@ -168,7 +168,6 @@ for php in sorted(data.keys(), key=php_key):
     variants = data[php]
     variant_names = sorted(variants.keys())
 
-    # Build multi-line cells (one line per variant)
     variants_cell = "<br>".join(f"<code>{html.escape(v)}</code>" for v in variant_names)
 
     tags_cell_lines: list[str] = []
