@@ -418,13 +418,21 @@ jobs:
             echo "https://img.shields.io/endpoint?url=${u}"
           }
 
+          urlencode() {
+            python3 - <<'PY' "$1"
+          import sys
+          from urllib.parse import quote
+          print(quote(sys.argv[1], safe=""))
+          PY
+          }
+          
           shields_static() {
             # $1=label $2=message $3=color
-            local label="$1" msg="$2" color="$3"
-            label="${label// /%20}"
-            msg="${msg// /%20}"
-            color="${color// /%20}"
-            echo "https://img.shields.io/badge/${label}-${msg}-${color}"
+            local label msg color
+            label="$(urlencode "$1")"
+            msg="$(urlencode "$2")"
+            color="$(urlencode "$3")"
+            echo "https://img.shields.io/static/v1?label=${label}&message=${msg}&color=${color}"
           }
 
           alpine_badge_md() {
