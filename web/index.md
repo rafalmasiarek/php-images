@@ -11,27 +11,6 @@ subtitle: Alpine-based multi-arch PHP images built in CI with Trivy reports.
       Each build runs Trivy scans and publishes HTML reports.
     </p>
 
-    <div class="kv">
-      <div class="item">
-        <h3>Registry</h3>
-        <code>ghcr.io/rafalmasiarek/php</code>
-      </div>
-      <div class="item">
-        <h3>Variants</h3>
-        <code>cli</code> · <code>fpm</code>
-      </div>
-      <div class="item">
-        <h3>Tags</h3>
-        <code>&lt;php&gt;-&lt;variant&gt;</code>, <code>...-YYYY-MM-DD</code>, <code>...-sha-&lt;gitsha7&gt;</code>
-      </div>
-      <div class="item">
-        <h3>Reports</h3>
-        <code>/reports/</code>
-      </div>
-    </div>
-
-    <hr />
-
     <p><a href="{{ site.baseurl }}/images">→ Browse images catalog</a></p>
   </div>
 
@@ -49,3 +28,4 @@ docker pull ghcr.io/rafalmasiarek/php:8.3-cli
 
 # Install extra extensions
 docker run --rm -it ghcr.io/rafalmasiarek/php:8.3-cli php -v
+```
