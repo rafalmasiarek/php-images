@@ -451,29 +451,32 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
+      
           test -d .git
-
+      
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
+      
+          # Zachowaj wygenerowane pliki zanim wyczyścisz repo
           rm -rf .publish
           mkdir -p .publish
-
           cp -r badges  .publish/badges  2>/dev/null || mkdir -p .publish/badges
           cp -r reports .publish/reports 2>/dev/null || mkdir -p .publish/reports
-
+      
+          # Orphan branch
           git checkout --orphan badges-tmp
-
-          git rm -rf . >/dev/null 2>&1 || true
-          rm -rf ./* ./.??* || true
-
+          git reset
+          
+          shopt -s extglob dotglob
+          rm -rf !(.git|.publish) || true
+          shopt -u extglob dotglob
+      
           mkdir -p badges reports
           cp -r .publish/badges/* badges/ 2>/dev/null || true
           cp -r .publish/reports/* reports/ 2>/dev/null || true
-
+      
           git add badges reports
           git commit -m "chore(badges): update" || true
-
+      
           git branch -M badges
           git push -f origin badges
