@@ -67,14 +67,13 @@ def os_badge(os_version: str) -> str:
     https://hub.docker.com/layers/library/alpine/X.XX
     """
     if not os_version or os_version == "unknown":
-        # fallback (no link)
-        badge = "https://img.shields.io/badge/alpine-unknown-lightgrey"
+        badge = "https://img.shields.io/badge/" + quote("alpine-unknown-lightgrey", safe="")
         return f"![alpine]({badge})"
 
     label = "alpine"
     message = f"v{os_version}"
-    # Use shields static badge; encode message safely
-    badge = "https://img.shields.io/badge/" + quote(f"{label}-{message}", safe="")
+    color = "blue"  # wymagane dla tego trybu badge
+    badge = "https://img.shields.io/badge/" + quote(f"{label}-{message}-{color}", safe="")
     link = f"https://hub.docker.com/layers/library/alpine/{os_version}"
     return f"[![alpine]({badge})]({link})"
 
