@@ -1,0 +1,228 @@
+name: discover-and-release-new-php
+
+on:
+  schedule:
+    - cron: "23 4 * * *" # daily (UTC)
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many new minor versions to propose per run (default 1)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Discover next PHP X.Y with required variants (stable X.Y.Z-*-alpine*)
+        id: discover
+        shell: bash
+        env:
+          # Default limiter = 1 (8.4 then next run 8.5)
+          LIMIT: ${{ github.event.inputs.limit || '1' }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json, os, re, shutil, sys
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          ROOT = Path(".")
+          VERSIONS_DIR = ROOT / "versions"
+
+          # Variants we require & scaffold (add more later, e.g. "apache")
+          REQUIRED_VARIANTS = ["cli", "fpm"]
+
+          # Limiter: how many new minor versions to propose per run (we create ONE PR; limiter keeps behavior predictable)
+          try:
+            LIMIT = int(os.environ.get("LIMIT", "1") or "1")
+          except Exception:
+            LIMIT = 1
+          if LIMIT < 1:
+            LIMIT = 1
+
+          def http_get_json(url: str, headers: dict[str,str] | None = None) -> dict:
+            req = Request(url, headers=headers or {})
+            with urlopen(req, timeout=30) as r:
+              return json.loads(r.read().decode("utf-8"))
+
+          def mm_key(s: str):
+            return tuple(int(x) for x in s.split("."))
+
+          # 1) Determine current highest existing X.Y in repo
+          existing_mm: list[str] = []
+          if VERSIONS_DIR.exists():
+            for p in VERSIONS_DIR.iterdir():
+              if p.is_dir() and re.match(r"^\d+\.\d+$", p.name):
+                existing_mm.append(p.name)
+
+          if not existing_mm:
+            print("No existing versions/* to copy from. Create a template first.")
+            sys.exit(1)
+
+          existing_mm = sorted(existing_mm, key=mm_key)
+          current_max = existing_mm[-1]
+          base_mm = current_max
+          base_dir = VERSIONS_DIR / base_mm
+
+          # Sanity: base has Dockerfiles for all required variants
+          missing = [v for v in REQUIRED_VARIANTS if not (base_dir / v / "Dockerfile").exists()]
+          if missing:
+            print(f"Base {base_mm} missing Dockerfile(s) for variants: {', '.join(missing)}")
+            sys.exit(1)
+
+          # Optional sanity: ensure pecl.txt exists in base for all variants (uncomment if you want hard failure)
+          # missing_pecl = [v for v in REQUIRED_VARIANTS if not (base_dir / v / "pecl.txt").exists()]
+          # if missing_pecl:
+          #   print(f"Base {base_mm} missing pecl.txt for variants: {', '.join(missing_pecl)}")
+          #   sys.exit(1)
+
+          # 2) Docker Hub auth token for registry API
+          token = http_get_json(
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/php:pull"
+          )["token"]
+
+          # 3) Fetch tags (accept alpine*; do NOT pin alpine version)
+          tags_resp = http_get_json(
+            "https://registry-1.docker.io/v2/library/php/tags/list?n=10000",
+            headers={"Authorization": f"Bearer {token}"}
+          )
+          tags = tags_resp.get("tags") or []
+          if not tags:
+            print("No tags returned from registry, abort.")
+            sys.exit(1)
+
+          # 4) Accept ONLY stable: X1.X2.X3-<variant>-alpine*
+          # RC/BETA/ALPHA are rejected by construction (patch must be digits only)
+          #
+          # Examples accepted:
+          #  - 8.3.16-cli-alpine
+          #  - 8.3.16-cli-alpine3.22
+          #  - 8.3.16-fpm-alpine3.23
+          #
+          # Examples rejected:
+          #  - 8.5.0RC1-cli-alpine3.22
+          #  - 8.5.0beta1-fpm-alpine3.22
+          #  - 8.5-cli-alpine3.22
+          #
+          # NOTE: This workflow requires upstream to have ALL REQUIRED_VARIANTS for a given X.Y.
+          variant_alt = "|".join(re.escape(v) for v in REQUIRED_VARIANTS)
+          tag_re = re.compile(
+            rf"^(?P<mm>\d+\.\d+)\.(?P<patch>\d+)-(?P<variant>{variant_alt})-alpine.*$"
+          )
+
+          # map: mm -> set(variants present upstream)
+          mm_variants: dict[str, set[str]] = {}
+
+          for t in tags:
+            m = tag_re.match(t)
+            if not m:
+              continue
+            mm = m.group("mm")
+            var = m.group("variant")
+            mm_variants.setdefault(mm, set()).add(var)
+
+          required_set = set(REQUIRED_VARIANTS)
+          upstream_mm = sorted(
+            [mm for mm, vars_ in mm_variants.items() if required_set.issubset(vars_)],
+            key=mm_key,
+          )
+
+          if not upstream_mm:
+            print(
+              "No upstream X.Y found with required variants "
+              f"{sorted(required_set)} (stable X.Y.Z-<variant>-alpine*)."
+            )
+            out = os.environ["GITHUB_OUTPUT"]
+            with open(out, "a", encoding="utf-8") as fh:
+              fh.write("new_php=\n")
+              fh.write("base_php=\n")
+            sys.exit(0)
+
+          # 5) Only versions strictly greater than current_max
+          newer = [mm for mm in upstream_mm if mm_key(mm) > mm_key(current_max)]
+          if not newer:
+            print(f"No newer versions than {current_max}.")
+            out = os.environ["GITHUB_OUTPUT"]
+            with open(out, "a", encoding="utf-8") as fh:
+              fh.write("new_php=\n")
+              fh.write("base_php=\n")
+            sys.exit(0)
+
+          newer_sorted = sorted(newer, key=mm_key)
+
+          # LIMIT behavior:
+          # - LIMIT=1 (default): propose the next minor after current_max (8.4 first, then next run 8.5)
+          # - LIMIT>1: (still one PR in this workflow) choose the next one; keeping LIMIT for future extension
+          chosen = newer_sorted[0]
+
+          target_dir = VERSIONS_DIR / chosen
+          if target_dir.exists():
+            print(f"versions/{chosen} already exists -> nothing to do.")
+            out = os.environ["GITHUB_OUTPUT"]
+            with open(out, "a", encoding="utf-8") as fh:
+              fh.write("new_php=\n")
+              fh.write("base_php=\n")
+            sys.exit(0)
+
+          print(f"Scaffolding versions/{chosen} from versions/{base_mm}")
+          shutil.copytree(base_dir, target_dir)
+
+          # Sanity: target has Dockerfiles for all required variants after copy
+          missing2 = [v for v in REQUIRED_VARIANTS if not (target_dir / v / "Dockerfile").exists()]
+          if missing2:
+            print(f"Scaffolded {chosen} missing Dockerfile(s) for variants: {', '.join(missing2)}")
+            sys.exit(1)
+
+          def replace_in_file(path: Path, old: str, new: str) -> None:
+            try:
+              txt = path.read_text(encoding="utf-8")
+            except Exception:
+              return
+            if old not in txt:
+              return
+            path.write_text(txt.replace(old, new), encoding="utf-8")
+
+          # Conservative replacements for common text files + Dockerfiles
+          for file in target_dir.rglob("*"):
+            if file.is_file():
+              if file.suffix in {".md", ".txt", ".sh", ".yml", ".yaml"} or file.name == "Dockerfile":
+                replace_in_file(file, f"php:{base_mm}", f"php:{chosen}")
+                replace_in_file(file, base_mm, chosen)
+
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a", encoding="utf-8") as fh:
+            fh.write(f"new_php={chosen}\n")
+            fh.write(f"base_php={base_mm}\n")
+
+          print(f"Done. New version: {chosen}, base: {base_mm}")
+          PY
+
+      - name: Create Pull Request
+        if: steps.discover.outputs.new_php != ''
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore(versions): add PHP ${{ steps.discover.outputs.new_php }}"
+          title: "chore: add PHP ${{ steps.discover.outputs.new_php }}"
+          body: |
+            This PR was generated automatically.
+
+            - Detected new upstream stable PHP minor version: `${{ steps.discover.outputs.new_php }}`
+            - Scaffolded from existing version: `${{ steps.discover.outputs.base_php }}`
+
+            Please review Dockerfile FROM lines and extensions if needed.
+          branch: "bot/add-php-${{ steps.discover.outputs.new_php }}"
+          delete-branch: true
+          labels: |
+            automation
+            php
+            versions
