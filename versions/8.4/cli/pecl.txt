@@ -1,0 +1,14 @@
+# FAT
+redis
+apcu
+mongodb
+msgpack
+mailparse
+xdebug
+imagick
+memcached
+amqp
+ssh2
+ast
+ds
+pcov
