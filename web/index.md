@@ -1,30 +1,18 @@
----
-layout: page
-title: PHP Images
-subtitle: Alpine-based multi-arch PHP images built in CI with Trivy reports.
----
-
-<section class="grid">
+<section class="grid hero">
   <article>
     <p>
       This repo builds lightweight PHP images on Alpine (amd64/arm64) and publishes them to GHCR.
       Each build runs Trivy scans and publishes HTML reports.
     </p>
 
-    <p>
+    <p class="hero-actions">
       <a href="{{ site.baseurl }}/images" role="button">Browse images catalog</a>
       <a href="{{ site.baseurl }}/reports/" class="secondary" role="button">View Trivy reports</a>
     </p>
 
-    <details>
-      <summary>Quick start</summary>
-
-```sh
-docker pull ghcr.io/rafalmasiarek/php:8.3-cli
-docker run --rm -it ghcr.io/rafalmasiarek/php:8.3-cli php -v
-```
-
-    </details>
+    <h3>Quick start</h3>
+    <pre class="hero-code"><code>docker pull ghcr.io/rafalmasiarek/php:8.3-cli
+docker run --rm -it ghcr.io/rafalmasiarek/php:8.3-cli php -v</code></pre>
   </article>
 
   <article>
