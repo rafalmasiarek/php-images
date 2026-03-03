@@ -3,6 +3,9 @@ name: build-php-images
 on:
   push:
     branches: ["main"]
+    paths-ignore:
+      - "web/badges/**"
+      - "web/reports/**"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -281,19 +284,16 @@ jobs:
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
-  release_and_site:
+  publish_release_and_web:
     needs: [matrix, build]
     if: github.ref == 'refs/heads/main' && needs.matrix.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download image metadata artifacts
         uses: actions/download-artifact@v8
@@ -386,28 +386,20 @@ jobs:
               --notes-file "$NOTES"
           done
 
-      - name: Build badges and site content
+      - name: Update web badges and reports (commit to main)
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf site
-          mkdir -p site/badges site/reports
+          mkdir -p web/badges web/reports
 
-          CRIT=0; HIGH=0; MED=0
-          COUNT=0
-
+          # Update per-variant badge JSONs + HTML reports (do not delete existing)
           for f in artifacts/trivy/*.txt; do
             PHP=$(grep '^php=' "$f" | cut -d= -f2)
             VAR=$(grep '^variant=' "$f" | cut -d= -f2)
             C=$(grep '^critical=' "$f" | cut -d= -f2)
             H=$(grep '^high=' "$f" | cut -d= -f2)
             M=$(grep '^medium=' "$f" | cut -d= -f2)
-
-            CRIT=$((CRIT + C))
-            HIGH=$((HIGH + H))
-            MED=$((MED + M))
-            COUNT=$((COUNT + 1))
 
             COLOR="brightgreen"
             if [ "$C" -gt 0 ]; then
@@ -418,43 +410,50 @@ jobs:
               COLOR="yellow"
             fi
 
-            cat > "site/badges/trivy-${PHP}-${VAR}.json" <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
+            cat > "web/badges/trivy-${PHP}-${VAR}.json" <<EOF
+          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}","critical":${C},"high":${H},"medium":${M},"php":"${PHP}","variant":"${VAR}"}
           EOF
 
             if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
-              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "site/reports/trivy-${PHP}-${VAR}.html"
+              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
             fi
           done
 
+          # Recompute totals from all existing per-variant badge JSONs
+          TOTAL_C=$(jq -s '[.[].critical] | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
+          TOTAL_H=$(jq -s '[.[].high]     | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
+          TOTAL_M=$(jq -s '[.[].medium]   | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
+
           TOTAL_COLOR="brightgreen"
-          if [ "$CRIT" -gt 0 ]; then
+          if [ "$TOTAL_C" -gt 0 ]; then
             TOTAL_COLOR="red"
-          elif [ "$HIGH" -gt 0 ]; then
+          elif [ "$TOTAL_H" -gt 0 ]; then
             TOTAL_COLOR="orange"
-          elif [ "$MED" -gt 0 ]; then
+          elif [ "$TOTAL_M" -gt 0 ]; then
             TOTAL_COLOR="yellow"
           fi
 
-          cat > site/badges/trivy-total.json <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${CRIT} H:${HIGH} M:${MED}","color":"${TOTAL_COLOR}"}
+          cat > web/badges/trivy-total.json <<EOF
+          {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}","critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
           EOF
 
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
-          cat > site/badges/php.json <<EOF
+          cat > web/badges/php.json <<EOF
           {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
           EOF
 
           BUILT="$(date -u +%Y-%m-%d)"
-          cat > site/badges/built.json <<EOF
+          cat > web/badges/built.json <<EOF
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
 
-          cat > site/badges/images.json <<EOF
-          {"schemaVersion":1,"label":"images","message":"${COUNT}","color":"blue"}
+          IMAGES_COUNT=$(ls -1 web/badges/trivy-*.json 2>/dev/null | wc -l | tr -d ' ')
+          cat > web/badges/images.json <<EOF
+          {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
 
+          # Index pages (handy for browsing)
           {
             echo "<!doctype html>"
             echo "<html><head><meta charset='utf-8'/>"
@@ -465,29 +464,14 @@ jobs:
             echo "<h1>Trivy HTML reports</h1>"
             echo "<p>Generated: <code>$(date -u +%Y-%m-%dT%H:%M:%SZ)</code></p>"
             echo "<ul>"
-            for f in site/reports/trivy-*.html; do
+            for f in web/reports/trivy-*.html; do
               [ -e "$f" ] || continue
               base="$(basename "$f")"
               echo "<li><a href='./${base}'>${base}</a></li>"
             done
             echo "</ul>"
             echo "</body></html>"
-          } > site/reports/index.html
-
-          {
-            echo "<!doctype html>"
-            echo "<html><head><meta charset='utf-8'/>"
-            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-            echo "<title>php-images</title>"
-            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
-            echo "</head><body>"
-            echo "<h1>php-images</h1>"
-            echo "<ul>"
-            echo "<li><a href='/reports/'>Trivy HTML reports</a></li>"
-            echo "<li><a href='/badges/'>Badges (JSON endpoints)</a></li>"
-            echo "</ul>"
-            echo "</body></html>"
-          } > site/index.html
+          } > web/reports/index.html
 
           {
             echo "<!doctype html>"
@@ -498,25 +482,24 @@ jobs:
             echo "</head><body>"
             echo "<h1>Badges</h1>"
             echo "<ul>"
-            for f in site/badges/*.json; do
+            for f in web/badges/*.json; do
               [ -e "$f" ] || continue
               base="$(basename "$f")"
               echo "<li><a href='./${base}'>${base}</a></li>"
             done
             echo "</ul>"
             echo "</body></html>"
-          } > site/badges/index.html
+          } > web/badges/index.html
 
-          echo "php-images.masiarek.dev" > site/CNAME
+          # Commit/push only if changed
+          git add web/badges web/reports
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v5
+          if git diff --cached --quiet; then
+            echo "No web output changes."
+            exit 0
+          fi
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore(web): update badges and reports"
+          git push
