@@ -1,6 +1,6 @@
 title: PHP Images
 description: Multi-arch Alpine-based PHP images with Trivy reports
-theme: minima
+theme: null
 markdown: kramdown
 
 url: "https://php-images.masiarek.dev"
