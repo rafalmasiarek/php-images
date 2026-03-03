@@ -1,18 +1,20 @@
 <div class="table-controls">
-  <input id="table-search" type="search" placeholder="Search (php, variant, tag, sha)..." autocomplete="off" />
-  <label>
-    Rows:
-    <select id="table-page-size">
-      <option>10</option>
-      <option selected>25</option>
-      <option>50</option>
-      <option>100</option>
-    </select>
-  </label>
+  <div class="left">
+    <input id="table-search" type="search" placeholder="Search (php, variant, tag, sha)..." autocomplete="off" />
+    <label class="muted">
+      Rows
+      <select id="table-page-size">
+        <option>10</option>
+        <option selected>25</option>
+        <option>50</option>
+        <option>100</option>
+      </select>
+    </label>
+  </div>
 
   <div class="table-pager">
     <button id="table-prev" type="button">Prev</button>
-    <span id="table-status">Page 1/1</span>
+    <span id="table-status" class="muted">Page 1/1</span>
     <button id="table-next" type="button">Next</button>
   </div>
 </div>
@@ -51,10 +53,8 @@
     page = Math.min(page, pages);
     page = Math.max(page, 1);
 
-    // hide all
     allRows.forEach(r => { r.style.display = 'none'; });
 
-    // show current page
     const start = (page - 1) * pageSize;
     const end = start + pageSize;
     rows.slice(start, end).forEach(r => { r.style.display = ''; });
@@ -89,28 +89,3 @@
   render();
 })();
 </script>
-
-<style>
-.table-controls{
-  display:flex;
-  flex-wrap:wrap;
-  gap:12px;
-  align-items:center;
-  margin:12px 0 16px;
-}
-.table-controls input[type="search"]{
-  min-width:260px;
-  padding:6px 10px;
-}
-.table-controls select{
-  padding:6px 8px;
-}
-.table-pager{
-  display:flex;
-  gap:8px;
-  align-items:center;
-}
-.table-pager button{
-  padding:6px 10px;
-}
-</style>

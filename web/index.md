@@ -1,7 +1,51 @@
 ---
 layout: page
-title: Images
+title: PHP Images
+subtitle: Alpine-based multi-arch PHP images built in CI with Trivy reports.
 ---
 
-{% include table-controls.html %}
-{% include generated-table.html %}
+<div class="hero">
+  <div class="card">
+    <p>
+      This repo builds lightweight PHP images on Alpine (amd64/arm64) and publishes them to GHCR.
+      Each build runs Trivy scans and publishes HTML reports.
+    </p>
+
+    <div class="kv">
+      <div class="item">
+        <h3>Registry</h3>
+        <code>ghcr.io/rafalmasiarek/php</code>
+      </div>
+      <div class="item">
+        <h3>Variants</h3>
+        <code>cli</code> · <code>fpm</code>
+      </div>
+      <div class="item">
+        <h3>Tags</h3>
+        <code>&lt;php&gt;-&lt;variant&gt;</code>, <code>...-YYYY-MM-DD</code>, <code>...-sha-&lt;gitsha7&gt;</code>
+      </div>
+      <div class="item">
+        <h3>Reports</h3>
+        <code>/reports/</code>
+      </div>
+    </div>
+
+    <hr />
+
+    <p><a href="{{ site.baseurl }}/images">→ Browse images catalog</a></p>
+  </div>
+
+  <div class="card">
+    <div class="badges">
+      <img src="https://github.com/rafalmasiarek/php-images/actions/workflows/build.yml/badge.svg?branch=main" alt="build" loading="lazy" />
+      <img src="https://img.shields.io/github/license/rafalmasiarek/php-images" alt="license" loading="lazy" />
+      <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-total.json" alt="trivy-total" loading="lazy" />
+      <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Fbuilt.json" alt="built" loading="lazy" />
+    </div>
+
+```sh
+# Example
+docker pull ghcr.io/rafalmasiarek/php:8.3-cli
+
+# Install extra extensions
+docker run --rm -it ghcr.io/rafalmasiarek/php:8.3-cli php -v

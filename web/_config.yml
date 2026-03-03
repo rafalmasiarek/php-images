@@ -1,6 +1,11 @@
-title: PHP Base Images Catalog
-description: Container images built by php-base-images repo
+title: PHP Images
+description: Multi-arch Alpine-based PHP images with Trivy reports
 theme: minima
-plugins:
-  - jekyll-seo-tag
 markdown: kramdown
+
+url: "https://php-images.masiarek.dev"
+baseurl: ""
+
+kramdown:
+  input: GFM
+  hard_wrap: false
