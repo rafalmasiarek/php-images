@@ -42,7 +42,7 @@ jobs:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
           python - <<'PY'
-          import json, os, subprocess
+          import json, os, subprocess, re
           from pathlib import Path
 
           root = Path("versions")
@@ -53,29 +53,36 @@ jobs:
           sha = os.environ.get("GITHUB_SHA", "")
 
           changed = None
+          touched_phps = set()
 
-          # Full build for schedule and manual runs
           if event in ("schedule", "workflow_dispatch"):
             changed = None
           elif event == "push" and before and before != "0000000000000000000000000000000000000000":
             out = subprocess.check_output(["git", "diff", "--name-only", f"{before}..{sha}"], text=True)
             changed = set(p.strip() for p in out.splitlines() if p.strip())
 
-            # If changes touch anything outside versions/, build all
             if any(not p.startswith("versions/") for p in changed):
               changed = None
+            else:
+              for p in changed:
+                m = re.match(r"^versions/([^/]+)/", p)
+                if m:
+                  touched_phps.add(m.group(1))
 
           for dockerfile in sorted(root.glob("*/*/Dockerfile")):
             php = dockerfile.parts[1]
-            variant = dockerfile.parts[2]  # cli/fpm
+            variant = dockerfile.parts[2]
             context_dir = dockerfile.parent
 
             dockerfile_rel = str(dockerfile)
             pecl_rel = str(context_dir / "pecl.txt")
 
             if changed is not None:
-              if dockerfile_rel not in changed and pecl_rel not in changed:
-                continue
+              if php in touched_phps:
+                pass
+              else:
+                if dockerfile_rel not in changed and pecl_rel not in changed:
+                  continue
 
             include.append({
               "php": php,
@@ -323,6 +330,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          SITE_BASE_URL="https://php-images.masiarek.dev"
+          IMAGE_BASE="ghcr.io/rafalmasiarek/php"
+
           mapfile -t PHPS < <(for f in artifacts/image-meta/*.txt; do grep '^php=' "$f" | cut -d= -f2; done | sort -V | uniq)
           if [ "${#PHPS[@]}" -eq 0 ]; then
             echo "No image-meta artifacts found."
@@ -333,6 +343,12 @@ jobs:
             TAG="php-${PHP}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
             NOTES="release-notes-${PHP}.md"
 
+            mapfile -t VARIANTS < <(find "versions/${PHP}" -mindepth 2 -maxdepth 2 -type f -name Dockerfile -print | awk -F/ '{print $(NF-1)}' | sort -u)
+            if [ "${#VARIANTS[@]}" -eq 0 ]; then
+              echo "No variants found for PHP ${PHP} under versions/${PHP}/"
+              continue
+            fi
+
             {
               echo "## PHP ${PHP} images"
               echo ""
@@ -341,39 +357,56 @@ jobs:
               echo "| Variant | Moving | Date | SHA | Digest |"
               echo "|---|---|---|---|---|"
 
-              for f in artifacts/image-meta/*.txt; do
-                FPHP=$(grep '^php=' "$f" | cut -d= -f2)
-                [ "$FPHP" = "$PHP" ] || continue
-                VAR=$(grep '^variant=' "$f" | cut -d= -f2)
-                SHA=$(grep '^image_sha=' "$f" | cut -d= -f2)
-                DATE=$(grep '^image_date=' "$f" | cut -d= -f2)
-                MOV=$(grep '^image_moving=' "$f" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$f" | cut -d= -f2)
-                echo "| \`${VAR}\` | \`${MOV}\` | \`${DATE}\` | \`${SHA}\` | \`${DIG}\` |"
+              for VAR in "${VARIANTS[@]}"; do
+                META_FILE=$(grep -l "^php=${PHP}\$" artifacts/image-meta/*.txt | xargs -r grep -l "^variant=${VAR}\$" || true)
+                if [ -n "${META_FILE}" ]; then
+                  SHA_TAG=$(grep '^image_sha=' "$META_FILE" | cut -d= -f2)
+                  DATE_TAG=$(grep '^image_date=' "$META_FILE" | cut -d= -f2)
+                  MOV_TAG=$(grep '^image_moving=' "$META_FILE" | cut -d= -f2)
+                  DIG=$(grep '^digest=' "$META_FILE" | cut -d= -f2)
+                  echo "| \`${VAR}\` | \`${MOV_TAG}\` | \`${DATE_TAG}\` | \`${SHA_TAG}\` | \`${DIG}\` |"
+                else
+                  echo "| \`${VAR}\` | \`${IMAGE_BASE}:${PHP}-${VAR}\` | - | - | - |"
+                fi
               done
 
               echo ""
               echo "### Trivy (ignore-unfixed; CRITICAL/HIGH/MEDIUM)"
               echo ""
-              echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM |"
-              echo "|---|---|---:|---:|---:|"
+              echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM | Report |"
+              echo "|---|---|---:|---:|---:|---|"
 
-              for f in artifacts/trivy/*.txt; do
-                FPHP=$(grep '^php=' "$f" | cut -d= -f2)
-                [ "$FPHP" = "$PHP" ] || continue
-                VAR=$(grep '^variant=' "$f" | cut -d= -f2)
-                IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$f" | cut -d= -f2)
-                C=$(grep '^critical=' "$f" | cut -d= -f2)
-                H=$(grep '^high=' "$f" | cut -d= -f2)
-                M=$(grep '^medium=' "$f" | cut -d= -f2)
-                echo "| \`${VAR}\` | \`${IMG}@${DIG}\` | $C | $H | $M |"
+              for VAR in "${VARIANTS[@]}"; do
+                TRI_FILE=$(grep -l "^php=${PHP}\$" artifacts/trivy/*.txt | xargs -r grep -l "^variant=${VAR}\$" || true)
+                if [ -n "${TRI_FILE}" ]; then
+                  IMG=$(grep '^image_sha=' "$TRI_FILE" | cut -d= -f2)
+                  DIG=$(grep '^digest=' "$TRI_FILE" | cut -d= -f2)
+                  C=$(grep '^critical=' "$TRI_FILE" | cut -d= -f2)
+                  H=$(grep '^high=' "$TRI_FILE" | cut -d= -f2)
+                  M=$(grep '^medium=' "$TRI_FILE" | cut -d= -f2)
+                  echo "| \`${VAR}\` | \`${IMG}@${DIG}\` | $C | $H | $M | ${SITE_BASE_URL}/reports/trivy-${PHP}-${VAR}.html |"
+                else
+                  echo "| \`${VAR}\` | - | - | - | - | ${SITE_BASE_URL}/reports/trivy-${PHP}-${VAR}.html |"
+                fi
               done
 
               echo ""
               echo "### Reports"
               echo ""
-              echo "- Trivy HTML reports: https://php-images.masiarek.dev/reports/"
+              for VAR in "${VARIANTS[@]}"; do
+                echo "- ${VAR}: ${SITE_BASE_URL}/reports/trivy-${PHP}-${VAR}.html"
+              done
+
+              echo ""
+              echo "### Badges"
+              echo ""
+              for VAR in "${VARIANTS[@]}"; do
+                echo "- trivy-${PHP}-${VAR}: ${SITE_BASE_URL}/badges/trivy-${PHP}-${VAR}.json"
+              done
+              echo "- trivy-total: ${SITE_BASE_URL}/badges/trivy-total.json"
+              echo "- php: ${SITE_BASE_URL}/badges/php.json"
+              echo "- built: ${SITE_BASE_URL}/badges/built.json"
+              echo "- images: ${SITE_BASE_URL}/badges/images.json"
             } > "$NOTES"
 
             if gh release view "$TAG" >/dev/null 2>&1; then
@@ -393,7 +426,6 @@ jobs:
 
           mkdir -p web/badges web/reports
 
-          # Update per-variant badge JSONs + HTML reports (do not delete existing)
           for f in artifacts/trivy/*.txt; do
             PHP=$(grep '^php=' "$f" | cut -d= -f2)
             VAR=$(grep '^variant=' "$f" | cut -d= -f2)
@@ -419,7 +451,6 @@ jobs:
             fi
           done
 
-          # Recompute totals from all existing per-variant badge JSONs
           TOTAL_C=$(jq -s '[.[].critical] | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
           TOTAL_H=$(jq -s '[.[].high]     | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
           TOTAL_M=$(jq -s '[.[].medium]   | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
@@ -453,7 +484,6 @@ jobs:
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
 
-          # Index pages (handy for browsing)
           {
             echo "<!doctype html>"
             echo "<html><head><meta charset='utf-8'/>"
@@ -491,7 +521,6 @@ jobs:
             echo "</body></html>"
           } > web/badges/index.html
 
-          # Commit/push only if changed
           git add web/badges web/reports
 
           if git diff --cached --quiet; then
