@@ -137,6 +137,33 @@
   word-break: break-word;
 }
 
+.hero{
+  margin-top: 1rem;
+}
+
+.hero-actions{
+  display:flex;
+  gap:.75rem;
+  flex-wrap:wrap;
+  align-items:center;
+}
+
+.hero-code{
+  margin-top: .5rem;
+  max-height: 220px;
+}
+
+.badges{
+  display:flex;
+  gap:.5rem;
+  flex-wrap:wrap;
+  align-items:center;
+}
+
+.badges img{
+  height: 20px;
+}
+
 @media (max-width: 700px){
   .header-inner{
     flex-direction: column;
