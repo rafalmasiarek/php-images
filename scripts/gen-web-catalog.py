@@ -117,12 +117,10 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
 
 html_out: list[str] = []
 
-html_out.append("<table>")
+html_out.append('<table id="images-table">')
 html_out.append(
     "<thead><tr>"
     "<th>PHP</th>"
-    "<th>Last build</th>"
-    "<th>SHA</th>"
     "<th>Tags</th>"
     "<th>OS</th>"
     "<th>Trivy</th>"
@@ -134,7 +132,7 @@ for php in sorted(data.keys(), key=php_key):
     variants = data[php]
     variant_names = sorted(variants.keys())
 
-    last_date, last_sha = load_last_build(php)
+    #last_date, last_sha = load_last_build(php)
 
     php_cell = (
         f'<a href="{html.escape(release_url_for_php(php))}" target="_blank" rel="noopener">'
@@ -159,8 +157,6 @@ for php in sorted(data.keys(), key=php_key):
 
     html_out.append("<tr>")
     html_out.append(f"<td>{php_cell}</td>")
-    html_out.append(f"<td><code>{html.escape(last_date)}</code></td>")
-    html_out.append(f"<td><code>{html.escape(last_sha)}</code></td>")
     html_out.append(f"<td>{'<br>'.join(tags_lines)}</td>")
     html_out.append(f"<td>{'<br>'.join(os_lines)}</td>")
     html_out.append(f"<td>{'<br>'.join(trivy_lines)}</td>")
