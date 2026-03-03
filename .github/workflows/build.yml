@@ -277,12 +277,23 @@ jobs:
 
           mkdir -p out
 
+          # Detect Alpine version from Dockerfile (first FROM line)
+          OS="$(awk '
+            BEGIN{IGNORECASE=1}
+            /^FROM[[:space:]]+/ {
+              if (match($0, /alpine:([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
+              if (match($0, /alpine([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
+            }
+          ' "${{ matrix.context }}/Dockerfile")"
+          [ -z "${OS}" ] && OS="unknown"
+
           META="out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt"
           SUM="out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
           cat > "${META}" <<EOF
           php=${{ matrix.php }}
           variant=${{ matrix.variant }}
+          os=${OS}
           image_sha=${{ steps.tags.outputs.TAG_SHA }}
           image_date=${{ steps.tags.outputs.TAG_DATE }}
           image_moving=${{ steps.tags.outputs.TAG_MOVING }}
@@ -351,7 +362,7 @@ jobs:
           path: artifacts/trivy-html
           merge-multiple: true
 
-      - name: Create versioned releases (per PHP)
+      - name: Create / update releases (per PHP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SITE_BASE_URL: ${{ env.SITE_BASE_URL }}
@@ -397,6 +408,37 @@ jobs:
             return 1
           }
 
+          shields_endpoint() {
+            # $1 = endpoint url
+            local u="$1"
+            u="${u//:/%3A}"
+            u="${u//\//%2F}"
+            u="${u//\?/%3F}"
+            u="${u//&/%26}"
+            echo "https://img.shields.io/endpoint?url=${u}"
+          }
+
+          shields_static() {
+            # $1=label $2=message $3=color
+            local label="$1" msg="$2" color="$3"
+            label="${label// /%20}"
+            msg="${msg// /%20}"
+            color="${color// /%20}"
+            echo "https://img.shields.io/badge/${label}-${msg}-${color}"
+          }
+
+          alpine_badge_md() {
+            local ver="$1"
+            if [ -z "$ver" ] || [ "$ver" = "unknown" ]; then
+              echo "![alpine]($(shields_static "alpine" "unknown" "lightgrey"))"
+              return 0
+            fi
+            local badge link
+            badge="$(shields_static "alpine" "v${ver}" "blue")"
+            link="https://hub.docker.com/layers/library/alpine/${ver}"
+            echo "[![alpine](${badge})](${link})"
+          }
+
           for PHP in "${PHPS[@]}"; do
             if [ ! -d "versions/${PHP}" ]; then
               echo "versions/${PHP} not found, skipping release."
@@ -424,12 +466,46 @@ jobs:
               fi
             done
 
-            TAG="php-${PHP}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+            TAG="php-${PHP}"
             NOTES="release-notes-${PHP}.md"
+
+            # build timestamp for THIS release notes (UTC, with minutes)
+            BUILT_UTC="$(date -u +%Y-%m-%d_%H:%M_UTC)"
+            PHP_BADGE="$(shields_static "php" "v${PHP}" "blue")"
+            BUILT_BADGE="$(shields_static "built" "${BUILT_UTC}" "blue")"
+
+            TRIVY_TOTAL_ENDPOINT="${SITE_BASE_URL}/badges/trivy-total.json"
+            TRIVY_TOTAL_BADGE="$(shields_endpoint "$TRIVY_TOTAL_ENDPOINT")"
+
+            # Alpine version from meta (prefer cli, fallback first variant)
+            OS_VER=""
+            if find_image_meta "$PHP" "cli" >/dev/null 2>&1; then
+              META_OS_FILE="$(find_image_meta "$PHP" "cli")"
+              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+            fi
+            if [ -z "$OS_VER" ]; then
+              META_OS_FILE="$(find_image_meta "$PHP" "${VARIANTS[0]}")"
+              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+            fi
+            ALPINE_BADGE_MD="$(alpine_badge_md "$OS_VER")"
 
             {
               echo "## PHP ${PHP} images"
               echo ""
+              echo "![php](${PHP_BADGE})"
+              echo "![built](${BUILT_BADGE})"
+              echo "${ALPINE_BADGE_MD}"
+              echo "![trivy-total](${TRIVY_TOTAL_BADGE})"
+              echo ""
+
+              # per-variant trivy badges (renderowane)
+              for V in "${VARIANTS[@]}"; do
+                TRIVY_ENDPOINT="${SITE_BASE_URL}/badges/trivy-${PHP}-${V}.json"
+                TRIVY_BADGE="$(shields_endpoint "$TRIVY_ENDPOINT")"
+                echo "**${V}**: ![trivy](${TRIVY_BADGE})"
+              done
+              echo ""
+
               echo "### Pull"
               echo ""
               echo "| Variant | Moving | Date | SHA | Digest |"
@@ -458,24 +534,18 @@ jobs:
                 R="${SITE_BASE_URL}/reports/trivy-${PHP}-${V}.html"
                 echo "| \`${V}\` | \`${IMG}@${DIG}\` | $C | $H | $M | ${R} |"
               done
-
-              echo ""
-              echo "### Badges"
-              echo ""
-              echo "- Total: ${SITE_BASE_URL}/badges/trivy-total.json"
-              for V in "${VARIANTS[@]}"; do
-                echo "- ${PHP}/${V}: ${SITE_BASE_URL}/badges/trivy-${PHP}-${V}.json"
-              done
             } > "$NOTES"
 
             if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "Release $TAG already exists, skipping."
-              continue
+              echo "Release $TAG already exists, updating notes."
+              gh release edit "$TAG" \
+                --title "${PHP}" \
+                --notes-file "$NOTES"
+            else
+              gh release create "$TAG" \
+                --title "${PHP}" \
+                --notes-file "$NOTES"
             fi
-
-            gh release create "$TAG" \
-              --title "${PHP}" \
-              --notes-file "$NOTES"
           done
 
       - name: Update web badges and reports
@@ -551,13 +621,15 @@ jobs:
           {"critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
           EOF
 
+          # Keep php.json/images.json generation (even if README doesn't show them)
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
           cat > web/badges/php.json <<EOF
           {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
           EOF
 
-          BUILT="$(date -u +%Y-%m-%d)"
+          # Built with time (UTC)
+          BUILT="$(date -u +%Y-%m-%d_%H:%M_UTC)"
           cat > web/badges/built.json <<EOF
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
@@ -614,4 +686,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(web): update badges and reports"
-          git push
+
+          # Handle non-fast-forward when main moved forward (race with other runs)
+          for i in 1 2 3; do
+            git pull --rebase origin main || true
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push failed (attempt $i), retrying..."
+            sleep 2
+          done
+
+          echo "Failed to push after retries" >&2
+          exit 1
