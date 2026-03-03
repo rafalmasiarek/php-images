@@ -91,14 +91,39 @@ jobs:
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/php:pull"
           )["token"]
 
-          # 3) Fetch tags (accept alpine*; do NOT pin alpine version)
-          tags_resp = http_get_json(
-            "https://registry-1.docker.io/v2/library/php/tags/list?n=10000",
-            headers={"Authorization": f"Bearer {token}"}
-          )
-          tags = tags_resp.get("tags") or []
+          # 3) Fetch ALL tags (Docker Registry tags/list is paginated)
+          def fetch_all_tags() -> list[str]:
+            tags: list[str] = []
+            last: str | None = None
+            n = 1000
+
+            while True:
+              url = f"https://registry-1.docker.io/v2/library/php/tags/list?n={n}"
+              if last:
+                url += f"&last={last}"
+
+              req = Request(url, headers={"Authorization": f"Bearer {token}"})
+              with urlopen(req, timeout=30) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                chunk = data.get("tags") or []
+                if not chunk:
+                  break
+
+                tags.extend(chunk)
+
+                # Pagination: Docker Registry uses Link header with rel="next"
+                link = r.headers.get("Link", "") or ""
+                if 'rel="next"' not in link:
+                  break
+
+                last = chunk[-1]
+
+            # Deduplicate (just in case)
+            return sorted(set(tags))
+
+          tags = fetch_all_tags()
           if not tags:
-            print("No tags returned from registry, abort.")
+            print("No tags returned from registry (after pagination), abort.")
             sys.exit(1)
 
           # 4) Accept ONLY stable: X1.X2.X3-<variant>-alpine*
