@@ -207,12 +207,18 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
+      - name: Fetch Trivy HTML template
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
+
       - name: Trivy scan (HTML report)
         uses: aquasecurity/trivy-action@0.34.2
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
           format: template
-          template: "@$HOME/.local/bin/trivy-bin/contrib/html.tpl"
+          template: "@trivy-html.tpl"
           output: trivy-report.html
           vuln-type: os,library
           severity: CRITICAL,HIGH,MEDIUM
@@ -415,6 +421,32 @@ jobs:
           {"schemaVersion":1,"label":"images","message":"${COUNT}","color":"blue"}
           EOF
 
+      - name: Generate reports index.html
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p reports
+
+          {
+            echo "<!doctype html>"
+            echo "<html><head><meta charset='utf-8'/>"
+            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+            echo "<title>Trivy reports</title>"
+            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
+            echo "</head><body>"
+            echo "<h1>Trivy HTML reports</h1>"
+            echo "<p>Generated: <code>$(date -u +%Y-%m-%dT%H:%M:%SZ)</code></p>"
+            echo "<ul>"
+            for f in reports/trivy-*.html; do
+              [ -e "$f" ] || continue
+              base="$(basename "$f")"
+              echo "<li><a href='./${base}'>${base}</a></li>"
+            done
+            echo "</ul>"
+            echo "</body></html>"
+          } > reports/index.html
+          
       - name: Publish badges + reports to 'badges' branch
         shell: bash
         run: |
@@ -423,7 +455,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Zachowaj wygenerowane pliki zanim wyczyścisz repo
+
           rm -rf .publish
           mkdir -p .publish
           if [ -d badges ]; then
@@ -437,9 +469,8 @@ jobs:
             mkdir -p .publish/reports
           fi
 
-          # Utwórz "czystą" gałąź z tylko badges/ i reports/
-          git checkout --orphan badges-tmp
-          rm -rf ./*
+          git rm -rf . >/dev/null 2>&1 || true
+          rm -rf ./* ./.??* || true
 
           mkdir -p badges reports
           cp -r .publish/badges/* badges/ 2>/dev/null || true
