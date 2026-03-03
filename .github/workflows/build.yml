@@ -371,27 +371,30 @@ jobs:
           find_image_meta() {
             local php="$1" var="$2"
             local f
-            for f in artifacts/image-meta/*.txt; do
-              [ -e "$f" ] || continue
+            while IFS= read -r -d '' f; do
               if grep -q "^php=${php}$" "$f" && grep -q "^variant=${var}$" "$f"; then
                 echo "$f"
                 return 0
               fi
-            done
+            done < <(find artifacts/image-meta -type f -name '*.txt' -print0)
             return 1
           }
 
           find_trivy_sum() {
             local php="$1" var="$2"
             local f
-            for f in artifacts/trivy/*.txt; do
-              [ -e "$f" ] || continue
+            while IFS= read -r -d '' f; do
               if grep -q "^php=${php}$" "$f" && grep -q "^variant=${var}$" "$f"; then
                 echo "$f"
                 return 0
               fi
-            done
+            done < <(find artifacts/trivy -type f -name '*.txt' -print0)
             return 1
+          }
+
+          find_trivy_html() {
+            local php="$1" var="$2"
+            find artifacts/trivy-html -type f -name "trivy-${php}-${var}.html" -print -quit
           }
 
           for PHP in "${PHPS[@]}"; do
@@ -415,7 +418,8 @@ jobs:
                 echo "Missing trivy summary for ${PHP}/${V}; refusing to create incomplete release."
                 exit 1
               fi
-              if [ ! -f "artifacts/trivy-html/trivy-${PHP}-${V}.html" ]; then
+              H="$(find_trivy_html "$PHP" "$V" || true)"
+              if [ -z "$H" ]; then
                 echo "Missing trivy HTML report for ${PHP}/${V}; refusing to create incomplete release."
                 exit 1
               fi
@@ -482,9 +486,7 @@ jobs:
 
           mkdir -p web/badges web/reports
 
-          for f in artifacts/trivy/*.txt; do
-            [ -e "$f" ] || continue
-
+          while IFS= read -r -d '' f; do
             PHP=$(grep '^php=' "$f" | cut -d= -f2)
             VAR=$(grep '^variant=' "$f" | cut -d= -f2)
             C=$(grep '^critical=' "$f" | cut -d= -f2)
@@ -504,14 +506,22 @@ jobs:
           {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}","critical":${C},"high":${H},"medium":${M},"php":"${PHP}","variant":"${VAR}"}
           EOF
 
-            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
-              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
+            HPATH="$(find artifacts/trivy-html -type f -name "trivy-${PHP}-${VAR}.html" -print -quit || true)"
+            if [ -n "$HPATH" ]; then
+              cp "$HPATH" "web/reports/trivy-${PHP}-${VAR}.html"
             fi
-          done
+          done < <(find artifacts/trivy -type f -name '*.txt' -print0)
 
-          TOTAL_C=$(jq -s '[.[].critical] | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
-          TOTAL_H=$(jq -s '[.[].high]     | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
-          TOTAL_M=$(jq -s '[.[].medium]   | add // 0' web/badges/trivy-*.json 2>/dev/null || echo 0)
+          mapfile -t PER_VARIANT_JSON < <(find web/badges -maxdepth 1 -type f -name 'trivy-[0-9]*.*-*.json' -print | sort)
+          if [ "${#PER_VARIANT_JSON[@]}" -eq 0 ]; then
+            TOTAL_C=0
+            TOTAL_H=0
+            TOTAL_M=0
+          else
+            TOTAL_C=$(jq -s 'map(.critical) | add // 0' "${PER_VARIANT_JSON[@]}")
+            TOTAL_H=$(jq -s 'map(.high)     | add // 0' "${PER_VARIANT_JSON[@]}")
+            TOTAL_M=$(jq -s 'map(.medium)   | add // 0' "${PER_VARIANT_JSON[@]}")
+          fi
 
           TOTAL_COLOR="brightgreen"
           if [ "$TOTAL_C" -gt 0 ]; then
@@ -537,7 +547,7 @@ jobs:
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
 
-          IMAGES_COUNT=$(ls -1 web/badges/trivy-*.json 2>/dev/null | wc -l | tr -d ' ')
+          IMAGES_COUNT=$(find web/badges -maxdepth 1 -type f -name 'trivy-[0-9]*.*-*.json' | wc -l | tr -d ' ')
           cat > web/badges/images.json <<EOF
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
