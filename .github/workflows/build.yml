@@ -452,22 +452,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          test -d .git
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-
           rm -rf .publish
           mkdir -p .publish
-          if [ -d badges ]; then
-            cp -r badges .publish/badges
-          else
-            mkdir -p .publish/badges
-          fi
-          if [ -d reports ]; then
-            cp -r reports .publish/reports
-          else
-            mkdir -p .publish/reports
-          fi
+
+          cp -r badges  .publish/badges  2>/dev/null || mkdir -p .publish/badges
+          cp -r reports .publish/reports 2>/dev/null || mkdir -p .publish/reports
+
+          git checkout --orphan badges-tmp
 
           git rm -rf . >/dev/null 2>&1 || true
           rm -rf ./* ./.??* || true
