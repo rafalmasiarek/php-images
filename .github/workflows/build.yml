@@ -50,9 +50,17 @@ jobs:
           sha = os.environ.get("GITHUB_SHA", "")
 
           changed = None
-          if event == "push" and before and before != "0000000000000000000000000000000000000000":
+
+          # Full build for schedule and manual runs
+          if event in ("schedule", "workflow_dispatch"):
+            changed = None
+          elif event == "push" and before and before != "0000000000000000000000000000000000000000":
             out = subprocess.check_output(["git", "diff", "--name-only", f"{before}..{sha}"], text=True)
             changed = set(p.strip() for p in out.splitlines() if p.strip())
+
+            # If changes touch anything outside versions/, build all
+            if any(not p.startswith("versions/") for p in changed):
+              changed = None
 
           for dockerfile in sorted(root.glob("*/*/Dockerfile")):
             php = dockerfile.parts[1]
@@ -62,7 +70,6 @@ jobs:
             dockerfile_rel = str(dockerfile)
             pecl_rel = str(context_dir / "pecl.txt")
 
-            # On push: build only if Dockerfile or pecl.txt changed
             if changed is not None:
               if dockerfile_rel not in changed and pecl_rel not in changed:
                 continue
@@ -197,7 +204,7 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-      - name: Trivy scan (JSON for release/badges)
+      - name: Trivy scan (JSON)
         uses: aquasecurity/trivy-action@0.34.2
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -274,12 +281,17 @@ jobs:
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
-  release:
+  release_and_site:
     needs: [matrix, build]
     if: github.ref == 'refs/heads/main' && needs.matrix.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
 
@@ -304,68 +316,90 @@ jobs:
           path: artifacts/trivy-html
           merge-multiple: true
 
-      - name: Compose release notes
-        id: notes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          TAG="images-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## Built images"
-            echo ""
-            for f in artifacts/image-meta/*.txt; do
-              PHP=$(grep '^php=' "$f" | cut -d= -f2)
-              VARIANT=$(grep '^variant=' "$f" | cut -d= -f2)
-              IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
-              DIG=$(grep '^digest=' "$f" | cut -d= -f2)
-              DATE=$(grep '^image_date=' "$f" | cut -d= -f2)
-              MOV=$(grep '^image_moving=' "$f" | cut -d= -f2)
-
-              echo "- **${PHP}/${VARIANT}**"
-              echo "  - sha: \`${IMG}@${DIG}\`"
-              echo "  - date: \`${DATE}\`"
-              echo "  - moving: \`${MOV}\`"
-            done
-
-            echo ""
-            echo "## Trivy vulnerability summary (ignore-unfixed; CRITICAL/HIGH/MEDIUM)"
-            echo ""
-            echo "| Image (tag@digest) | CRITICAL | HIGH | MEDIUM |"
-            echo "|---|---:|---:|---:|"
-            for f in artifacts/trivy/*.txt; do
-              IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
-              DIG=$(grep '^digest=' "$f" | cut -d= -f2)
-              C=$(grep '^critical=' "$f" | cut -d= -f2)
-              H=$(grep '^high=' "$f" | cut -d= -f2)
-              M=$(grep '^medium=' "$f" | cut -d= -f2)
-              echo "| \`${IMG}@${DIG}\` | $C | $H | $M |"
-            done
-          } > release-notes.md
-
-      - name: Create GitHub Release
+      - name: Create versioned releases (per PHP)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release create "${{ steps.notes.outputs.tag }}" \
-            --title "Container images ${{ steps.notes.outputs.tag }}" \
-            --notes-file release-notes.md
+          set -euo pipefail
 
-      - name: Generate badge JSON files + prepare reports
+          mapfile -t PHPS < <(for f in artifacts/image-meta/*.txt; do grep '^php=' "$f" | cut -d= -f2; done | sort -V | uniq)
+          if [ "${#PHPS[@]}" -eq 0 ]; then
+            echo "No image-meta artifacts found."
+            exit 0
+          fi
+
+          for PHP in "${PHPS[@]}"; do
+            TAG="php-${PHP}-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+            NOTES="release-notes-${PHP}.md"
+
+            {
+              echo "## PHP ${PHP} images"
+              echo ""
+              echo "### Pull"
+              echo ""
+              echo "| Variant | Moving | Date | SHA | Digest |"
+              echo "|---|---|---|---|---|"
+
+              for f in artifacts/image-meta/*.txt; do
+                FPHP=$(grep '^php=' "$f" | cut -d= -f2)
+                [ "$FPHP" = "$PHP" ] || continue
+                VAR=$(grep '^variant=' "$f" | cut -d= -f2)
+                SHA=$(grep '^image_sha=' "$f" | cut -d= -f2)
+                DATE=$(grep '^image_date=' "$f" | cut -d= -f2)
+                MOV=$(grep '^image_moving=' "$f" | cut -d= -f2)
+                DIG=$(grep '^digest=' "$f" | cut -d= -f2)
+                echo "| \`${VAR}\` | \`${MOV}\` | \`${DATE}\` | \`${SHA}\` | \`${DIG}\` |"
+              done
+
+              echo ""
+              echo "### Trivy (ignore-unfixed; CRITICAL/HIGH/MEDIUM)"
+              echo ""
+              echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM |"
+              echo "|---|---|---:|---:|---:|"
+
+              for f in artifacts/trivy/*.txt; do
+                FPHP=$(grep '^php=' "$f" | cut -d= -f2)
+                [ "$FPHP" = "$PHP" ] || continue
+                VAR=$(grep '^variant=' "$f" | cut -d= -f2)
+                IMG=$(grep '^image_sha=' "$f" | cut -d= -f2)
+                DIG=$(grep '^digest=' "$f" | cut -d= -f2)
+                C=$(grep '^critical=' "$f" | cut -d= -f2)
+                H=$(grep '^high=' "$f" | cut -d= -f2)
+                M=$(grep '^medium=' "$f" | cut -d= -f2)
+                echo "| \`${VAR}\` | \`${IMG}@${DIG}\` | $C | $H | $M |"
+              done
+
+              echo ""
+              echo "### Reports"
+              echo ""
+              echo "- Trivy HTML reports: https://php-images.masiarek.dev/reports/"
+            } > "$NOTES"
+
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists, skipping."
+              continue
+            fi
+
+            gh release create "$TAG" \
+              --title "${PHP}" \
+              --notes-file "$NOTES"
+          done
+
+      - name: Build badges and site content
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p badges reports
+
+          rm -rf site
+          mkdir -p site/badges site/reports
 
           CRIT=0; HIGH=0; MED=0
           COUNT=0
 
           for f in artifacts/trivy/*.txt; do
             PHP=$(grep '^php=' "$f" | cut -d= -f2)
-            VARIANT=$(grep '^variant=' "$f" | cut -d= -f2)
+            VAR=$(grep '^variant=' "$f" | cut -d= -f2)
             C=$(grep '^critical=' "$f" | cut -d= -f2)
             H=$(grep '^high=' "$f" | cut -d= -f2)
             M=$(grep '^medium=' "$f" | cut -d= -f2)
@@ -384,12 +418,12 @@ jobs:
               COLOR="yellow"
             fi
 
-            cat > "badges/trivy-${PHP}-${VARIANT}.json" <<EOF
+            cat > "site/badges/trivy-${PHP}-${VAR}.json" <<EOF
           {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
           EOF
 
-            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VARIANT}.html" ]; then
-              cp "artifacts/trivy-html/trivy-${PHP}-${VARIANT}.html" "reports/trivy-${PHP}-${VARIANT}.html"
+            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
+              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "site/reports/trivy-${PHP}-${VAR}.html"
             fi
           done
 
@@ -402,31 +436,24 @@ jobs:
             TOTAL_COLOR="yellow"
           fi
 
-          cat > badges/trivy-total.json <<EOF
+          cat > site/badges/trivy-total.json <<EOF
           {"schemaVersion":1,"label":"trivy","message":"C:${CRIT} H:${HIGH} M:${MED}","color":"${TOTAL_COLOR}"}
           EOF
 
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
-          cat > badges/php.json <<EOF
+          cat > site/badges/php.json <<EOF
           {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
           EOF
 
           BUILT="$(date -u +%Y-%m-%d)"
-          cat > badges/built.json <<EOF
+          cat > site/badges/built.json <<EOF
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
 
-          cat > badges/images.json <<EOF
+          cat > site/badges/images.json <<EOF
           {"schemaVersion":1,"label":"images","message":"${COUNT}","color":"blue"}
           EOF
-
-      - name: Generate reports index.html
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p reports
 
           {
             echo "<!doctype html>"
@@ -438,45 +465,58 @@ jobs:
             echo "<h1>Trivy HTML reports</h1>"
             echo "<p>Generated: <code>$(date -u +%Y-%m-%dT%H:%M:%SZ)</code></p>"
             echo "<ul>"
-            for f in reports/trivy-*.html; do
+            for f in site/reports/trivy-*.html; do
               [ -e "$f" ] || continue
               base="$(basename "$f")"
               echo "<li><a href='./${base}'>${base}</a></li>"
             done
             echo "</ul>"
             echo "</body></html>"
-          } > reports/index.html
-          
-      - name: Publish badges + reports to 'badges' branch
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          test -d .git
-      
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      
-          # Zachowaj wygenerowane pliki zanim wyczyścisz repo
-          rm -rf .publish
-          mkdir -p .publish
-          cp -r badges  .publish/badges  2>/dev/null || mkdir -p .publish/badges
-          cp -r reports .publish/reports 2>/dev/null || mkdir -p .publish/reports
-      
-          # Orphan branch
-          git checkout --orphan badges-tmp
-          git reset
-          
-          shopt -s extglob dotglob
-          rm -rf !(.git|.publish) || true
-          shopt -u extglob dotglob
-      
-          mkdir -p badges reports
-          cp -r .publish/badges/* badges/ 2>/dev/null || true
-          cp -r .publish/reports/* reports/ 2>/dev/null || true
-      
-          git add badges reports
-          git commit -m "chore(badges): update" || true
-      
-          git branch -M badges
-          git push -f origin badges
+          } > site/reports/index.html
+
+          {
+            echo "<!doctype html>"
+            echo "<html><head><meta charset='utf-8'/>"
+            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+            echo "<title>php-images</title>"
+            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
+            echo "</head><body>"
+            echo "<h1>php-images</h1>"
+            echo "<ul>"
+            echo "<li><a href='/reports/'>Trivy HTML reports</a></li>"
+            echo "<li><a href='/badges/'>Badges (JSON endpoints)</a></li>"
+            echo "</ul>"
+            echo "</body></html>"
+          } > site/index.html
+
+          {
+            echo "<!doctype html>"
+            echo "<html><head><meta charset='utf-8'/>"
+            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
+            echo "<title>Badges</title>"
+            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
+            echo "</head><body>"
+            echo "<h1>Badges</h1>"
+            echo "<ul>"
+            for f in site/badges/*.json; do
+              [ -e "$f" ] || continue
+              base="$(basename "$f")"
+              echo "<li><a href='./${base}'>${base}</a></li>"
+            done
+            echo "</ul>"
+            echo "</body></html>"
+          } > site/badges/index.html
+
+          echo "php-images.masiarek.dev" > site/CNAME
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
