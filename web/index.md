@@ -1,3 +1,8 @@
+---
+layout: page
+title: PHP Images
+subtitle: Alpine-based multi-arch PHP images built in CI with Trivy reports.
+---
 <section class="grid hero">
   <article>
     <p>
