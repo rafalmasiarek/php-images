@@ -9,7 +9,7 @@
     ],
     "dependencyDashboard": true,
     "schedule": [
-        "after 02:00 and before 06:00 every day"
+        "after 02:00 and before 06:00"
     ],
     "dockerfile": {
         "enabled": true
@@ -39,7 +39,7 @@
         {
             "description": "Upgrade Alpine base OS used by images",
             "matchManagers": [
-                "regex"
+                "custom.regex"
             ],
             "matchDepNames": [
                 "alpine"
@@ -76,8 +76,8 @@
         {
             "customType": "regex",
             "description": "Track Alpine version embedded in php:<php>-<variant>-alpine<alpine> in Dockerfiles",
-            "fileMatch": [
-                "^versions/[^/]+/[^/]+/Dockerfile$"
+            "managerFilePatterns": [
+                "/^versions/[^/]+/[^/]+/Dockerfile$/"
             ],
             "matchStrings": [
                 "FROM\\s+php:(?<phpVersion>\\d+\\.\\d+\\.\\d+)(?:-[^\\s]+)?-alpine(?<currentValue>\\d+\\.\\d+)"
