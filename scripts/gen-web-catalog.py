@@ -10,10 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 REPO = "rafalmasiarek/php-images"
 
-# Public site base URL (GitHub Pages via Deployments / Jekyll)
 SITE_BASE_URL = "https://php-images.masiarek.dev"
 
-# This is the package name used by build.yml (ghcr.io/<owner>/php)
 IMAGE_NAME = "php"
 
 
@@ -30,12 +28,6 @@ def load_pecl(dirpath: Path) -> list[str]:
 
 
 def detect_alpine(dockerfile: Path) -> str:
-    """
-    Tries to detect Alpine version from Dockerfile FROM line.
-    Supports:
-      - alpine:3.20
-      - php:8.x-alpine3.20
-    """
     txt = dockerfile.read_text(encoding="utf-8", errors="replace")
     from_line = ""
     for line in txt.splitlines():
@@ -64,7 +56,6 @@ def badge_img(url: str, alt: str) -> str:
 
 
 def shields_endpoint_badge(endpoint_url: str, alt: str) -> str:
-    # Shields expects the endpoint URL to be URL-encoded
     shields = "https://img.shields.io/endpoint?url=" + quote(endpoint_url, safe="")
     return badge_img(shields, alt)
 
@@ -99,7 +90,6 @@ def license_badge() -> str:
     return badge_img(url, "license")
 
 
-# Collect info: php -> variant -> info
 data: dict[str, dict[str, dict[str, object]]] = {}
 
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
@@ -124,7 +114,6 @@ def php_key(s: str) -> tuple[int, ...]:
         return (0,)
 
 
-# Build HTML
 html_out: list[str] = []
 
 html_out.append("<h2>Catalog</h2>")
