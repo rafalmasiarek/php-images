@@ -563,6 +563,49 @@ jobs:
 
           mkdir -p web/badges web/reports
 
+          # Generate per-PHP "last build" info from image-meta artifacts
+          # We prefer cli meta if present, otherwise first meta found for that PHP.
+          for PHP_DIR in versions/*; do
+            [ -d "$PHP_DIR" ] || continue
+            PHP="$(basename "$PHP_DIR")"
+
+            META_FILE=""
+            # Prefer cli if exists
+            for f in artifacts/image-meta/*.txt; do
+              [ -e "$f" ] || continue
+              if grep -q "^php=${PHP}$" "$f" && grep -q "^variant=cli$" "$f"; then
+                META_FILE="$f"
+                break
+              fi
+            done
+            # Fallback: any variant
+            if [ -z "$META_FILE" ]; then
+              for f in artifacts/image-meta/*.txt; do
+                [ -e "$f" ] || continue
+                if grep -q "^php=${PHP}$" "$f"; then
+                  META_FILE="$f"
+                  break
+                fi
+              done
+            fi
+
+            if [ -z "$META_FILE" ]; then
+              continue
+            fi
+
+            DATE="$(grep '^image_date=' "$META_FILE" | cut -d= -f2 || true)"
+            SHA_TAG="$(grep '^image_sha=' "$META_FILE" | cut -d= -f2 || true)"
+            # Extract last 7 from "...-sha-XXXXXXX" if present
+            SHA7="$(printf '%s' "$SHA_TAG" | sed -n 's/.*-sha-\([0-9a-f]\{7\}\).*/\1/p')"
+
+            [ -z "$DATE" ] && DATE="unknown"
+            [ -z "$SHA7" ] && SHA7="unknown"
+
+            cat > "web/badges/last-${PHP}.json" <<EOF
+          {"php":"${PHP}","date":"${DATE}","sha":"${SHA7}"}
+          EOF
+          done
+
           # Totals computed from trivy summary artifacts (not from badge JSON)
           TOTAL_C=0
           TOTAL_H=0
