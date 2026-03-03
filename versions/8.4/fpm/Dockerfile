@@ -17,7 +17,6 @@ RUN set -eux; \
     ; \
     \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
-    docker-php-ext-configure imap --with-kerberos --with-imap-ssl; \
     docker-php-ext-configure ldap; \
     \
     docker-php-ext-install -j"$(nproc)" \
@@ -30,7 +29,7 @@ RUN set -eux; \
     pgsql \
     soap sockets \
     tidy xsl zip \
-    snmp imap ldap \
+    snmp ldap \
     ; \
     \
     pecl channel-update pecl.php.net; \
