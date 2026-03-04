@@ -1,0 +1,258 @@
+name: build-and-test-new-php-versions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "versions/**"
+      - ".github/workflows/build-php-versions.yml"
+  push:
+    branches:
+      - "bot/add-php-*"
+    paths:
+      - "versions/**"
+      - ".github/workflows/build-php-versions.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: build-php-versions-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: discover changed versions
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.matrix.outputs.has_changes }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute build matrix from changed Dockerfiles
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+
+          changed="$(git diff --name-only "$base" "$head" | grep -E '^versions/[0-9]+\.[0-9]+/(cli|fpm)/Dockerfile$' || true)"
+
+          if [ -z "${changed//[[:space:]]/}" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import json, os, re
+          changed = os.environ["CHANGED"].splitlines()
+
+          include = []
+          for p in changed:
+            m = re.match(r"^versions/(\d+\.\d+)/(cli|fpm)/Dockerfile$", p)
+            if not m:
+              continue
+            mm, variant = m.group(1), m.group(2)
+            include.append({
+              "mm": mm,
+              "variant": variant,
+              "context": f"versions/{mm}/{variant}",
+              "dockerfile": f"versions/{mm}/{variant}/Dockerfile",
+              "tag": f"local/php-{mm}-{variant}:report"
+            })
+
+          matrix = {"include": include}
+          print("MATRIX_JSON=" + json.dumps(matrix))
+          PY > /tmp/matrix.env
+
+          # Export outputs
+          . /tmp/matrix.env
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+        env:
+          CHANGED: ${{ github.event_name == 'pull_request' && '' || '' }}
+
+  build:
+    name: build and report
+    needs: discover
+    if: needs.discover.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 1) Multi-arch build (build-only validation)
+      - name: Build (linux/amd64, linux/arm64) - build-only
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 2) Build amd64 with load for runtime inspection/report
+      - name: Build (linux/amd64) - load for report
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: ${{ matrix.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate PHP report (markdown)
+        id: report
+        shell: bash
+        run: |
+          set -euo pipefail
+          img="${{ matrix.tag }}"
+
+          out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
+
+          {
+            echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
+            echo "## PHP report: \`${{ matrix.mm }}\` / \`${{ matrix.variant }}\`"
+            echo
+            echo "**Image (local):** \`$img\`"
+            echo
+            echo "### php -v"
+            echo '```'
+            docker run --rm "$img" sh -lc 'php -v'
+            echo '```'
+            echo
+            echo "### php --ini"
+            echo '```'
+            docker run --rm "$img" sh -lc 'php --ini'
+            echo '```'
+            echo
+            echo "### Extensions (php -m | sort)"
+            echo '```'
+            docker run --rm "$img" sh -lc 'php -m | sort'
+            echo '```'
+            echo
+            echo "### PECL packages (pecl list)"
+            echo '```'
+            docker run --rm "$img" sh -lc 'pecl list 2>/dev/null || true'
+            echo '```'
+            echo
+            echo "### Per-extension versions (best effort)"
+            echo '```'
+            docker run --rm "$img" sh -lc 'php -r '"'"'
+              $exts = get_loaded_extensions();
+              sort($exts);
+              foreach ($exts as $e) {
+                $v = phpversion($e);
+                if ($v === false || $v === null || $v === "") $v = "(built-in/unknown)";
+                echo str_pad($e, 22) . " " . $v . PHP_EOL;
+              }
+            '"'"''
+            echo '```'
+            echo
+            echo "### extension_dir and .so listing"
+            echo '```'
+            docker run --rm "$img" sh -lc '
+              extdir="$(php -i | awk -F" => " "/^extension_dir/ {print \$2}" | head -n1)";
+              echo "extension_dir=$extdir";
+              ls -la "$extdir" || true
+            '
+            echo '```'
+          } > "$out"
+
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
+          path: ${{ steps.report.outputs.path }}
+
+      - name: Comment report on PR (create/update)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const body = fs.readFileSync('${{ steps.report.outputs.path }}', 'utf8');
+            const marker = `<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->`;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100
+            });
+
+            const existing = comments.find(c => (c.body || '').includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo,
+                issue_number,
+                body
+              });
+            }
+
+  skip:
+    name: build and report (no changes)
+    needs: discover
+    if: needs.discover.outputs.has_changes != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No version Dockerfiles changed
+        run: |
+          echo "No changes detected in versions/*/(cli|fpm)/Dockerfile. Skipping build."
+
+  ci:
+    name: build-php-versions (required)
+    runs-on: ubuntu-latest
+    needs: [discover, build, skip]
+    if: always()
+    steps:
+      - name: Decide final status
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # If build ran and failed -> fail CI.
+          if [ "${{ needs.build.result }}" = "failure" ] || [ "${{ needs.build.result }}" = "cancelled" ]; then
+            echo "Build job failed or was cancelled."
+            exit 1
+          fi
+
+          # If skip ran -> succeed.
+          # If build ran and succeeded -> succeed.
+          echo "CI succeeded."
