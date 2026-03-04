@@ -23,8 +23,8 @@ RUN set -eux; \
     bcmath bz2 calendar \
     curl exif ftp \
     gd gettext gmp \
-    intl mbstring mysqli \
-    opcache pcntl \
+    intl mysqli \
+    pcntl \
     pdo pdo_mysql pdo_pgsql pdo_sqlite \
     pgsql \
     soap sockets \
