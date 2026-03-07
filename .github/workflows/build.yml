@@ -225,7 +225,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
 
       - name: Trivy scan (SARIF)
-        uses: aquasecurity/trivy-action@0.34.2
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
           format: sarif
@@ -240,7 +240,7 @@ jobs:
           sarif_file: trivy-results.sarif
 
       - name: Trivy scan (JSON)
-        uses: aquasecurity/trivy-action@0.34.2
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
           format: json
@@ -256,7 +256,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
 
       - name: Trivy scan (HTML report)
-        uses: aquasecurity/trivy-action@0.34.2
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
           format: template
