@@ -64,15 +64,23 @@ RUN set -eux; \
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /opt/php-ext/conf.d/available/ /opt/php-ext/conf.d/available/
 COPY .hotfixes-selected/ /opt/hotfixes-selected/
+COPY rootfs/ /
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY docker-entrypoint.d/ /docker-entrypoint.d/
 
 RUN set -eux; \
     mkdir -p /usr/local/etc/php/conf.d; \
     rm -f /usr/local/etc/php/conf.d/*.ini || true; \
+    chmod +x /usr/local/bin/docker-entrypoint.sh; \
+    mkdir -p /docker-entrypoint.d; \
+    find /docker-entrypoint.d -type f -name '*.sh' -exec chmod +x {} \; || true; \
     if [ -d /opt/hotfixes-selected ]; then \
     find /opt/hotfixes-selected -maxdepth 1 -type f -name '*.sh' | sort | while read -r f; do \
+    echo "[hotfix] loading: $f"; \
     chmod +x "$f"; \
     /bin/sh "$f"; \
     done; \
     fi
 
-COPY rootfs/ /
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["php-fpm"]

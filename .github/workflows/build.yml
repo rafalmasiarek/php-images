@@ -285,6 +285,52 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
+      - name: Detect Alpine versions
+        id: alpine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DOCKERFILE_ALPINE_FULL="$(
+            awk '
+              BEGIN { IGNORECASE=1 }
+              /^FROM[[:space:]]+/ {
+                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+              }
+            ' "${{ matrix.dockerfile }}" || true
+          )"
+
+          DOCKERFILE_ALPINE_MINOR=""
+          if [ -n "$DOCKERFILE_ALPINE_FULL" ]; then
+            DOCKERFILE_ALPINE_MINOR="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
+
+          IMAGE_ALPINE_FULL="$(
+            docker run --rm local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate \
+              cat /etc/alpine-release 2>/dev/null || true
+          )"
+
+          IMAGE_ALPINE_MINOR=""
+          if [ -n "$IMAGE_ALPINE_FULL" ]; then
+            IMAGE_ALPINE_MINOR="$(printf '%s' "$IMAGE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
+
+          echo "dockerfile_full=$DOCKERFILE_ALPINE_FULL" >> "$GITHUB_OUTPUT"
+          echo "dockerfile_minor=$DOCKERFILE_ALPINE_MINOR" >> "$GITHUB_OUTPUT"
+          echo "image_full=$IMAGE_ALPINE_FULL" >> "$GITHUB_OUTPUT"
+          echo "image_minor=$IMAGE_ALPINE_MINOR" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Alpine detection"
+            echo "- Dockerfile full: \`${DOCKERFILE_ALPINE_FULL:-<empty>}\`"
+            echo "- Dockerfile minor: \`${DOCKERFILE_ALPINE_MINOR:-<empty>}\`"
+            echo "- Image full: \`${IMAGE_ALPINE_FULL:-<empty>}\`"
+            echo "- Image minor: \`${IMAGE_ALPINE_MINOR:-<empty>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Select matching hotfixes
         id: hotfixes
         shell: bash
@@ -294,50 +340,112 @@ jobs:
           rm -rf .hotfixes-selected
           mkdir -p .hotfixes-selected
 
-          ALPINE_FULL="$(awk '
-            BEGIN { IGNORECASE=1 }
-            /^FROM[[:space:]]+/ {
-              if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-              if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-            }
-          ' "${{ matrix.dockerfile }}")"
-          [ -z "$ALPINE_FULL" ] && ALPINE_FULL="unknown"
-          ALPINE_MINOR="$(printf '%s' "$ALPINE_FULL" | cut -d. -f1,2)"
-
           mapfile -t CVES < <(
             jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
           )
 
-          SEARCH_DIRS=(
-            "hotfixes/all"
-            "hotfixes/alpine/all"
-            "hotfixes/alpine/${ALPINE_MINOR}"
-            "hotfixes/alpine/${ALPINE_FULL}"
-            "hotfixes/php/${{ matrix.php }}/all"
-            "hotfixes/php/${{ matrix.php }}/${{ matrix.variant }}"
-          )
+          declare -a SEARCH_DIRS=()
+          add_dir() {
+            local dir="$1"
+            [ -z "$dir" ] && return 0
+            for existing in "${SEARCH_DIRS[@]:-}"; do
+              [ "$existing" = "$dir" ] && return 0
+            done
+            SEARCH_DIRS+=("$dir")
+          }
+
+          add_dir "hotfixes/all"
+          add_dir "hotfixes/alpine/all"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.dockerfile_minor }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.dockerfile_full }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.image_minor }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.image_full }}"
+          add_dir "hotfixes/php/${{ matrix.php }}/all"
+          add_dir "hotfixes/php/${{ matrix.php }}/${{ matrix.variant }}"
+
+          declare -a MATCHED_CVES=()
+          declare -a UNMATCHED_CVES=()
+          declare -a SELECTED_FILES=()
 
           found=0
           idx=0
 
           for cve in "${CVES[@]}"; do
+            matched_this_cve=0
+
             for dir in "${SEARCH_DIRS[@]}"; do
               [ -d "$dir" ] || continue
               shopt -s nullglob
               for f in "$dir/${cve}"-*.sh; do
                 idx=$((idx + 1))
-                cp "$f" ".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
+                dest=".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
+                cp "$f" "$dest"
+                SELECTED_FILES+=("$f")
+                matched_this_cve=1
                 found=1
               done
               shopt -u nullglob
             done
+
+            if [ "$matched_this_cve" -eq 1 ]; then
+              MATCHED_CVES+=("$cve")
+            else
+              UNMATCHED_CVES+=("$cve")
+            fi
           done
+
+          joined() {
+            local IFS=','
+            echo "$*"
+          }
 
           if [ "$found" -eq 1 ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
+
+          echo "matched_cves=$(joined "${MATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "unmatched_cves=$(joined "${UNMATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "selected_count=${#SELECTED_FILES[@]}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Hotfix selection"
+            echo "- PHP: \`${{ matrix.php }}\`"
+            echo "- Variant: \`${{ matrix.variant }}\`"
+            echo "- Search dirs:"
+            for dir in "${SEARCH_DIRS[@]}"; do
+              echo "  - \`$dir\`"
+            done
+            echo "- CVEs from pre-scan: \`${#CVES[@]}\`"
+            echo "- CVEs matched by hotfix: \`${#MATCHED_CVES[@]}\`"
+            echo "- CVEs without hotfix: \`${#UNMATCHED_CVES[@]}\`"
+            echo "- Selected scripts: \`${#SELECTED_FILES[@]}\`"
+
+            if [ "${#MATCHED_CVES[@]}" -gt 0 ]; then
+              echo
+              echo "**Matched CVEs**"
+              for cve in "${MATCHED_CVES[@]}"; do
+                echo "- \`$cve\`"
+              done
+            fi
+
+            if [ "${#UNMATCHED_CVES[@]}" -gt 0 ]; then
+              echo
+              echo "**Unmatched CVEs**"
+              for cve in "${UNMATCHED_CVES[@]}"; do
+                echo "- \`$cve\`"
+              done
+            fi
+
+            if [ "${#SELECTED_FILES[@]}" -gt 0 ]; then
+              echo
+              echo "**Selected hotfix scripts**"
+              for f in "${SELECTED_FILES[@]}"; do
+                echo "- \`$f\`"
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push final image without hotfixes
         if: steps.hotfixes.outputs.enabled != 'true'
@@ -426,6 +534,102 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
+      - name: Analyze remediation result
+        id: remediation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t PRE_CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
+          )
+
+          mapfile -t POST_CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results.json | sort -u
+          )
+
+          declare -A PRE_SET=()
+          declare -A POST_SET=()
+
+          for cve in "${PRE_CVES[@]}"; do
+            PRE_SET["$cve"]=1
+          done
+          for cve in "${POST_CVES[@]}"; do
+            POST_SET["$cve"]=1
+          done
+
+          declare -a FIXED_CVES=()
+          declare -a REMAINING_CVES=()
+          declare -a NEW_CVES=()
+
+          for cve in "${PRE_CVES[@]}"; do
+            if [ -n "${POST_SET[$cve]:-}" ]; then
+              REMAINING_CVES+=("$cve")
+            else
+              FIXED_CVES+=("$cve")
+            fi
+          done
+
+          for cve in "${POST_CVES[@]}"; do
+            if [ -z "${PRE_SET[$cve]:-}" ]; then
+              NEW_CVES+=("$cve")
+            fi
+          done
+
+          joined() {
+            local IFS=','
+            echo "$*"
+          }
+
+          echo "fixed_cves=$(joined "${FIXED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "remaining_cves=$(joined "${REMAINING_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "new_cves=$(joined "${NEW_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "fixed_count=${#FIXED_CVES[@]}" >> "$GITHUB_OUTPUT"
+          echo "remaining_count=${#REMAINING_CVES[@]}" >> "$GITHUB_OUTPUT"
+          echo "new_count=${#NEW_CVES[@]}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Hotfix effectiveness"
+            echo "- Fixed CVEs: \`${#FIXED_CVES[@]}\`"
+            echo "- Remaining CVEs: \`${#REMAINING_CVES[@]}\`"
+            echo "- New CVEs after rebuild: \`${#NEW_CVES[@]}\`"
+
+            if [ "${#FIXED_CVES[@]}" -gt 0 ]; then
+              echo
+              echo "**Fixed after rebuild**"
+              for cve in "${FIXED_CVES[@]}"; do
+                echo "- \`$cve\`"
+              done
+            fi
+
+            if [ "${#REMAINING_CVES[@]}" -gt 0 ]; then
+              echo
+              echo "**Still present after rebuild**"
+              for cve in "${REMAINING_CVES[@]}"; do
+                echo "- \`$cve\`"
+              done
+            fi
+
+            if [ "${#NEW_CVES[@]}" -gt 0 ]; then
+              echo
+              echo "**New after rebuild**"
+              for cve in "${NEW_CVES[@]}"; do
+                echo "- \`$cve\`"
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print hotfix status
+        shell: bash
+        run: |
+          echo "Hotfix enabled: ${{ steps.hotfixes.outputs.enabled }}"
+          echo "Matched CVEs: ${{ steps.hotfixes.outputs.matched_cves }}"
+          echo "Unmatched CVEs: ${{ steps.hotfixes.outputs.unmatched_cves }}"
+          echo "Selected scripts count: ${{ steps.hotfixes.outputs.selected_count }}"
+          echo "Fixed CVEs: ${{ steps.remediation.outputs.fixed_cves }}"
+          echo "Remaining CVEs: ${{ steps.remediation.outputs.remaining_cves }}"
+          echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
+
       - name: Fetch Trivy HTML template
         shell: bash
         run: |
@@ -454,13 +658,10 @@ jobs:
 
           mkdir -p out
 
-          OS="$(awk '
-            BEGIN { IGNORECASE=1 }
-            /^FROM[[:space:]]+/ {
-              if (match($0, /alpine:([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
-              if (match($0, /alpine([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
-            }
-          ' "${{ matrix.dockerfile }}")"
+          OS="${{ steps.alpine.outputs.image_full }}"
+          if [ -z "$OS" ]; then
+            OS="${{ steps.alpine.outputs.dockerfile_full }}"
+          fi
           [ -z "$OS" ] && OS="unknown"
 
           META="out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt"
