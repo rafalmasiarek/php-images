@@ -302,6 +302,7 @@ jobs:
               }
             ' "${{ matrix.dockerfile }}" || true
           )"
+          DOCKERFILE_ALPINE_FULL="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | tr -d '\r\n')"
 
           DOCKERFILE_ALPINE_MINOR=""
           if [ -n "$DOCKERFILE_ALPINE_FULL" ]; then
@@ -310,18 +311,21 @@ jobs:
 
           IMAGE_ALPINE_FULL="$(
             docker run --rm local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate \
-              cat /etc/alpine-release 2>/dev/null || true
+              sh -lc 'cat /etc/alpine-release' || true
           )"
+          IMAGE_ALPINE_FULL="$(printf '%s' "$IMAGE_ALPINE_FULL" | tr -d '\r\n')"
 
           IMAGE_ALPINE_MINOR=""
           if [ -n "$IMAGE_ALPINE_FULL" ]; then
             IMAGE_ALPINE_MINOR="$(printf '%s' "$IMAGE_ALPINE_FULL" | cut -d. -f1,2)"
           fi
 
-          echo "dockerfile_full=$DOCKERFILE_ALPINE_FULL" >> "$GITHUB_OUTPUT"
-          echo "dockerfile_minor=$DOCKERFILE_ALPINE_MINOR" >> "$GITHUB_OUTPUT"
-          echo "image_full=$IMAGE_ALPINE_FULL" >> "$GITHUB_OUTPUT"
-          echo "image_minor=$IMAGE_ALPINE_MINOR" >> "$GITHUB_OUTPUT"
+          {
+            printf 'dockerfile_full=%s\n' "$DOCKERFILE_ALPINE_FULL"
+            printf 'dockerfile_minor=%s\n' "$DOCKERFILE_ALPINE_MINOR"
+            printf 'image_full=%s\n' "$IMAGE_ALPINE_FULL"
+            printf 'image_minor=%s\n' "$IMAGE_ALPINE_MINOR"
+          } >> "$GITHUB_OUTPUT"
 
           {
             echo "### Alpine detection"
