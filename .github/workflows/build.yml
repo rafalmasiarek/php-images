@@ -310,8 +310,8 @@ jobs:
           fi
 
           IMAGE_ALPINE_FULL="$(
-            docker run --rm local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate \
-              sh -lc 'cat /etc/alpine-release' || true
+            docker run --rm --entrypoint /bin/sh local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate \
+              -lc 'cat /etc/alpine-release' || true
           )"
           IMAGE_ALPINE_FULL="$(printf '%s' "$IMAGE_ALPINE_FULL" | tr -d '\r\n')"
 
