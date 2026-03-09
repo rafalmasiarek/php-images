@@ -2,7 +2,6 @@
 FROM php:8.2.30-cli-alpine3.22 AS builder
 
 ARG PECL_FILE=pecl.txt
-
 COPY ${PECL_FILE} /tmp/pecl.txt
 
 RUN set -eux; \
@@ -16,11 +15,9 @@ RUN set -eux; \
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
     imagemagick-dev imagemagick \
     ; \
-    \
     docker-php-ext-configure gd --with-freetype --with-jpeg; \
     docker-php-ext-configure imap --with-kerberos --with-imap-ssl; \
     docker-php-ext-configure ldap; \
-    \
     docker-php-ext-install -j"$(nproc)" \
     bcmath bz2 calendar \
     curl exif ftp \
@@ -33,9 +30,7 @@ RUN set -eux; \
     tidy xsl zip \
     snmp imap ldap \
     ; \
-    \
     pecl channel-update pecl.php.net; \
-    \
     mods=""; \
     while IFS= read -r line; do \
     line="$(echo "$line" | sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//')"; \
@@ -46,7 +41,6 @@ RUN set -eux; \
     pecl install $mods; \
     docker-php-ext-enable $mods; \
     fi; \
-    \
     mkdir -p /opt/php-ext/conf.d/available; \
     if [ -d /usr/local/etc/php/conf.d ]; then \
     for f in /usr/local/etc/php/conf.d/*.ini; do \
@@ -54,7 +48,6 @@ RUN set -eux; \
     mv "$f" "/opt/php-ext/conf.d/available/$(basename "$f")"; \
     done; \
     fi; \
-    \
     apk del .build-deps
 
 FROM php:8.2.30-cli-alpine3.22 AS runtime
@@ -70,9 +63,16 @@ RUN set -eux; \
 
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /opt/php-ext/conf.d/available/ /opt/php-ext/conf.d/available/
+COPY .hotfixes-selected/ /opt/hotfixes-selected/
 
 RUN set -eux; \
     mkdir -p /usr/local/etc/php/conf.d; \
-    rm -f /usr/local/etc/php/conf.d/*.ini || true
+    rm -f /usr/local/etc/php/conf.d/*.ini || true; \
+    if [ -d /opt/hotfixes-selected ]; then \
+    find /opt/hotfixes-selected -maxdepth 1 -type f -name '*.sh' | sort | while read -r f; do \
+    chmod +x "$f"; \
+    /bin/sh "$f"; \
+    done; \
+    fi
 
 COPY rootfs/ /

@@ -6,6 +6,7 @@ on:
     paths:
       - "versions/**"
       - "rootfs/**"
+      - "hotfixes/**"
       - "scripts/compute-tags.sh"
       - "scripts/gen-readme.py"
       - "scripts/gen-web-catalog.py"
@@ -107,6 +108,16 @@ jobs:
                 parts = path.split("/")
                 if len(parts) >= 2 and parts[1]:
                   touched_phps.add(parts[1])
+                  continue
+
+              if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
+                full_build = True
+                continue
+
+              if path.startswith("hotfixes/php/"):
+                parts = path.split("/")
+                if len(parts) >= 3 and parts[2]:
+                  touched_phps.add(parts[2])
                   continue
 
               if path.startswith("rootfs/"):
@@ -239,8 +250,98 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push image
-        id: buildpush
+      - name: Prepare selected hotfix directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .hotfixes-selected
+          mkdir -p .hotfixes-selected
+
+      - name: Build local candidate image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          platforms: linux/amd64
+          build-args: |
+            PECL_FILE=${{ matrix.context }}/pecl.txt
+          tags: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+
+      - name: Trivy scan candidate (JSON)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
+          format: json
+          output: trivy-results-pre.json
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Select matching hotfixes
+        id: hotfixes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf .hotfixes-selected
+          mkdir -p .hotfixes-selected
+
+          ALPINE_FULL="$(awk '
+            BEGIN { IGNORECASE=1 }
+            /^FROM[[:space:]]+/ {
+              if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+              if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+            }
+          ' "${{ matrix.dockerfile }}")"
+          [ -z "$ALPINE_FULL" ] && ALPINE_FULL="unknown"
+          ALPINE_MINOR="$(printf '%s' "$ALPINE_FULL" | cut -d. -f1,2)"
+
+          mapfile -t CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
+          )
+
+          SEARCH_DIRS=(
+            "hotfixes/all"
+            "hotfixes/alpine/all"
+            "hotfixes/alpine/${ALPINE_MINOR}"
+            "hotfixes/alpine/${ALPINE_FULL}"
+            "hotfixes/php/${{ matrix.php }}/all"
+            "hotfixes/php/${{ matrix.php }}/${{ matrix.variant }}"
+          )
+
+          found=0
+          idx=0
+
+          for cve in "${CVES[@]}"; do
+            for dir in "${SEARCH_DIRS[@]}"; do
+              [ -d "$dir" ] || continue
+              shopt -s nullglob
+              for f in "$dir/${cve}"-*.sh; do
+                idx=$((idx + 1))
+                cp "$f" ".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
+                found=1
+              done
+              shopt -u nullglob
+            done
+          done
+
+          if [ "$found" -eq 1 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push final image without hotfixes
+        if: steps.hotfixes.outputs.enabled != 'true'
+        id: buildpush_plain
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -260,7 +361,47 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
 
-      - name: Trivy scan (SARIF)
+      - name: Push final image with hotfixes
+        if: steps.hotfixes.outputs.enabled == 'true'
+        id: buildpush_hotfix
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            PECL_FILE=${{ matrix.context }}/pecl.txt
+          tags: |
+            ${{ steps.tags.outputs.TAG_MOVING }}
+            ${{ steps.tags.outputs.TAG_DATE }}
+            ${{ steps.tags.outputs.TAG_SHA }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+
+      - name: Resolve final digest
+        id: finalimg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DIGEST="${{ steps.buildpush_hotfix.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            DIGEST="${{ steps.buildpush_plain.outputs.digest }}"
+          fi
+
+          if [ -z "$DIGEST" ]; then
+            echo "Final digest is empty." >&2
+            exit 1
+          fi
+
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan final image (SARIF)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -275,7 +416,7 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-      - name: Trivy scan (JSON)
+      - name: Trivy scan final image (JSON)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -291,7 +432,7 @@ jobs:
           set -euo pipefail
           curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
 
-      - name: Trivy scan (HTML report)
+      - name: Trivy scan final image (HTML report)
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -332,14 +473,14 @@ jobs:
           image_sha=${{ steps.tags.outputs.TAG_SHA }}
           image_date=${{ steps.tags.outputs.TAG_DATE }}
           image_moving=${{ steps.tags.outputs.TAG_MOVING }}
-          digest=${{ steps.buildpush.outputs.digest }}
+          digest=${{ steps.finalimg.outputs.digest }}
           EOF
 
           cat > "$SUM" <<EOF
           php=${{ matrix.php }}
           variant=${{ matrix.variant }}
           image_sha=${{ steps.tags.outputs.TAG_SHA }}
-          digest=${{ steps.buildpush.outputs.digest }}
+          digest=${{ steps.finalimg.outputs.digest }}
           critical=${CRIT}
           high=${HIGH}
           medium=${MED}
