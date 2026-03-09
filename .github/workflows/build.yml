@@ -3,9 +3,18 @@ name: build-php-images
 on:
   push:
     branches: ["main"]
-    paths-ignore:
-      - "web/badges/**"
-      - "web/reports/**"
+    paths:
+      - "versions/**"
+      - "rootfs/**"
+      - "scripts/compute-tags.sh"
+      - "scripts/gen-readme.py"
+      - "scripts/gen-web-catalog.py"
+      - "web/_config.yml"
+      - "web/index.md"
+      - "web/reports/index.md"
+      - "web/Gemfile"
+      - "web/Gemfile.lock"
+      - ".github/workflows/build.yml"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -16,17 +25,31 @@ on:
         default: "ghcr"
         type: choice
         options: [ghcr, custom]
+      deploy_target:
+        description: "Where to deploy the generated site"
+        required: false
+        default: "pages"
+        type: choice
+        options: [pages, rsync]
       custom_namespace:
         description: "Custom namespace override (e.g. registry.example.com/team)"
         required: false
         default: ""
 
+permissions:
+  contents: read
+
+concurrency:
+  group: build-php-images-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   IMAGE_NAME: php
-  SITE_BASE_URL: https://php-images.masiarek.dev
+  SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
 
 jobs:
-  matrix:
+  discover:
+    name: discover work
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
@@ -38,14 +61,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate build matrix from versions/ tree
+      - name: Generate build matrix and execution plan
         id: gen
         shell: bash
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
-          python - <<'PY'
-          import json, os, subprocess
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
           from pathlib import Path
 
           root = Path("versions")
@@ -60,9 +85,9 @@ jobs:
             return sorted([p.name for p in root.iterdir() if p.is_dir()])
 
           def dockerfiles_for_php(php: str) -> list[Path]:
-            return sorted((root / php).glob("*/*/Dockerfile")) if (root / php).exists() else []
+            return sorted((root / php).glob("*/Dockerfile")) if (root / php).exists() else []
 
-          changed = None
+          changed: list[str] | None = None
           if event in ("schedule", "workflow_dispatch"):
             changed = None
           elif event == "push" and before and before != "0000000000000000000000000000000000000000":
@@ -77,19 +102,26 @@ jobs:
           if changed is None:
             full_build = True
           else:
-            if ".github/workflows/build.yml" in changed:
-              full_build = True
-            else:
-              for p in changed:
-                if p.startswith("versions/"):
-                  parts = p.split("/", 2)
-                  if len(parts) >= 2 and parts[1]:
-                    touched_phps.add(parts[1])
-                else:
-                  full_build = True
+            for path in changed:
+              if path.startswith("versions/"):
+                parts = path.split("/")
+                if len(parts) >= 2 and parts[1]:
+                  touched_phps.add(parts[1])
+                  continue
+
+              if path.startswith("rootfs/"):
+                full_build = True
+                continue
+
+              if path in {
+                ".github/workflows/build.yml",
+                "scripts/compute-tags.sh",
+              }:
+                full_build = True
+                continue
 
           include = []
-          phps_to_build: list[str] = []
+          phps_to_build: list[str]
 
           if full_build:
             phps_to_build = all_php_versions()
@@ -104,11 +136,11 @@ jobs:
           for dockerfile in dockerfiles:
             php = dockerfile.parts[1]
             variant = dockerfile.parts[2]
-            context_dir = dockerfile.parent
             include.append({
               "php": php,
               "variant": variant,
-              "context": str(context_dir),
+              "context": f"versions/{php}/{variant}",
+              "dockerfile": f"versions/{php}/{variant}/Dockerfile",
             })
 
           matrix = {"include": include}
@@ -122,8 +154,9 @@ jobs:
           PY
 
   build:
-    needs: matrix
-    if: needs.matrix.outputs.count != '0'
+    name: build and scan images
+    needs: discover
+    if: needs.discover.outputs.count != '0'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -131,7 +164,7 @@ jobs:
       security-events: write
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v6
@@ -140,25 +173,26 @@ jobs:
         id: ns
         shell: bash
         run: |
+          set -euo pipefail
+
           TARGET="${{ github.event.inputs.publish_target }}"
           [ -z "$TARGET" ] && TARGET="ghcr"
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
 
           if [ "$TARGET" = "custom" ]; then
             if [ -z "${{ secrets.REGISTRY_HOST }}" ] || [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_PASSWORD }}" ]; then
-              echo "Missing secrets: REGISTRY_HOST/REGISTRY_USERNAME/REGISTRY_PASSWORD" >&2
+              echo "Missing secrets: REGISTRY_HOST / REGISTRY_USERNAME / REGISTRY_PASSWORD" >&2
               exit 1
             fi
 
             if [ -n "${{ github.event.inputs.custom_namespace }}" ]; then
               NAMESPACE="${{ github.event.inputs.custom_namespace }}"
+            elif [ -n "${{ secrets.IMAGE_NAMESPACE }}" ]; then
+              NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ secrets.IMAGE_NAMESPACE }}"
             else
-              if [ -n "${{ secrets.IMAGE_NAMESPACE }}" ]; then
-                NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ secrets.IMAGE_NAMESPACE }}"
-              else
-                NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ github.repository_owner }}"
-              fi
+              NAMESPACE="${{ secrets.REGISTRY_HOST }}/${{ github.repository_owner }}"
             fi
+
             echo "namespace=$NAMESPACE" >> "$GITHUB_OUTPUT"
           else
             echo "namespace=ghcr.io/${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
@@ -166,6 +200,7 @@ jobs:
 
       - name: Login to custom registry
         if: steps.ns.outputs.target == 'custom'
+        shell: bash
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY_HOST }}" -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
 
@@ -187,10 +222,11 @@ jobs:
         id: tags
         shell: bash
         run: |
+          set -euo pipefail
           PREFIX="${{ matrix.php }}-${{ matrix.variant }}"
           ./scripts/compute-tags.sh "${{ steps.ns.outputs.namespace }}" "${{ env.IMAGE_NAME }}" "$PREFIX" >> "$GITHUB_OUTPUT"
 
-      - name: Docker meta (OCI labels/annotations)
+      - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -203,12 +239,12 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Build & push (multi-arch)
+      - name: Build and push image
         id: buildpush
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: ${{ matrix.context }}/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
@@ -234,7 +270,7 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
-      - name: Upload Trivy results to GitHub Security
+      - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
@@ -266,7 +302,7 @@ jobs:
           severity: CRITICAL,HIGH,MEDIUM
           ignore-unfixed: true
 
-      - name: Write image + Trivy artifacts
+      - name: Write image and scan artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -277,20 +313,19 @@ jobs:
 
           mkdir -p out
 
-          # Detect Alpine version from Dockerfile (first FROM line)
           OS="$(awk '
-            BEGIN{IGNORECASE=1}
+            BEGIN { IGNORECASE=1 }
             /^FROM[[:space:]]+/ {
               if (match($0, /alpine:([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
               if (match($0, /alpine([0-9]+(\.[0-9]+)*)/, m)) { print m[1]; exit }
             }
-          ' "${{ matrix.context }}/Dockerfile")"
-          [ -z "${OS}" ] && OS="unknown"
+          ' "${{ matrix.dockerfile }}")"
+          [ -z "$OS" ] && OS="unknown"
 
           META="out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt"
           SUM="out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
-          cat > "${META}" <<EOF
+          cat > "$META" <<EOF
           php=${{ matrix.php }}
           variant=${{ matrix.variant }}
           os=${OS}
@@ -300,7 +335,7 @@ jobs:
           digest=${{ steps.buildpush.outputs.digest }}
           EOF
 
-          cat > "${SUM}" <<EOF
+          cat > "$SUM" <<EOF
           php=${{ matrix.php }}
           variant=${{ matrix.variant }}
           image_sha=${{ steps.tags.outputs.TAG_SHA }}
@@ -330,18 +365,35 @@ jobs:
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
-  publish_release_and_web:
-    needs: [matrix, build]
-    if: github.ref == 'refs/heads/main' && needs.matrix.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
+  update-repo:
+    name: update releases and generated repository content
+    needs: [discover, build]
+    if: github.ref == 'refs/heads/main' && always()
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Validate upstream jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SITE_BASE_URL}" ]; then
+            echo "Repository variable SITE_BASE_URL is required." >&2
+            exit 1
+          fi
+
+          if [ "${{ needs.discover.outputs.count }}" != "0" ] && [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Build job did not complete successfully." >&2
+            exit 1
+          fi
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Download image metadata artifacts
+        if: needs.discover.outputs.count != '0'
         uses: actions/download-artifact@v8
         with:
           pattern: image-meta-*
@@ -349,6 +401,7 @@ jobs:
           merge-multiple: true
 
       - name: Download Trivy summary artifacts
+        if: needs.discover.outputs.count != '0'
         uses: actions/download-artifact@v8
         with:
           pattern: trivy-summary-*
@@ -356,21 +409,22 @@ jobs:
           merge-multiple: true
 
       - name: Download Trivy HTML report artifacts
+        if: needs.discover.outputs.count != '0'
         uses: actions/download-artifact@v8
         with:
           pattern: trivy-report-*
           path: artifacts/trivy-html
           merge-multiple: true
 
-      - name: Create / update releases (per PHP)
+      - name: Create or update releases
+        if: needs.discover.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SITE_BASE_URL: ${{ env.SITE_BASE_URL }}
         shell: bash
         run: |
           set -euo pipefail
 
-          PHPS_JSON='${{ needs.matrix.outputs.phps }}'
+          PHPS_JSON='${{ needs.discover.outputs.phps }}'
           if [ -z "$PHPS_JSON" ] || [ "$PHPS_JSON" = "null" ]; then
             echo "No PHP versions to release."
             exit 0
@@ -383,12 +437,12 @@ jobs:
           fi
 
           find_image_meta() {
-            local php="$1" var="$2"
-            local f
-            for f in artifacts/image-meta/*.txt; do
-              [ -e "$f" ] || continue
-              if grep -q "^php=${php}$" "$f" && grep -q "^variant=${var}$" "$f"; then
-                echo "$f"
+            local php="$1" variant="$2"
+            local file
+            for file in artifacts/image-meta/*.txt; do
+              [ -e "$file" ] || continue
+              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
+                echo "$file"
                 return 0
               fi
             done
@@ -396,26 +450,16 @@ jobs:
           }
 
           find_trivy_sum() {
-            local php="$1" var="$2"
-            local f
-            for f in artifacts/trivy/*.txt; do
-              [ -e "$f" ] || continue
-              if grep -q "^php=${php}$" "$f" && grep -q "^variant=${var}$" "$f"; then
-                echo "$f"
+            local php="$1" variant="$2"
+            local file
+            for file in artifacts/trivy/*.txt; do
+              [ -e "$file" ] || continue
+              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
+                echo "$file"
                 return 0
               fi
             done
             return 1
-          }
-
-          shields_endpoint() {
-            # $1 = endpoint url
-            local u="$1"
-            u="${u//:/%3A}"
-            u="${u//\//%2F}"
-            u="${u//\?/%3F}"
-            u="${u//&/%26}"
-            echo "https://img.shields.io/endpoint?url=${u}"
           }
 
           urlencode() {
@@ -425,25 +469,34 @@ jobs:
           print(quote(sys.argv[1], safe=""))
           PY
           }
-          
+
+          shields_endpoint() {
+            local url="$1"
+            url="${url//:/%3A}"
+            url="${url//\//%2F}"
+            url="${url//\?/%3F}"
+            url="${url//&/%26}"
+            echo "https://img.shields.io/endpoint?url=${url}"
+          }
+
           shields_static() {
-            # $1=label $2=message $3=color
-            local label msg color
+            local label message color
             label="$(urlencode "$1")"
-            msg="$(urlencode "$2")"
+            message="$(urlencode "$2")"
             color="$(urlencode "$3")"
-            echo "https://img.shields.io/static/v1?label=${label}&message=${msg}&color=${color}"
+            echo "https://img.shields.io/static/v1?label=${label}&message=${message}&color=${color}"
           }
 
           alpine_badge_md() {
-            local ver="$1"
-            if [ -z "$ver" ] || [ "$ver" = "unknown" ]; then
+            local version="$1"
+            if [ -z "$version" ] || [ "$version" = "unknown" ]; then
               echo "![alpine]($(shields_static "alpine" "unknown" "lightgrey"))"
               return 0
             fi
+
             local badge link
-            badge="$(shields_static "alpine" "v${ver}" "blue")"
-            link="https://hub.docker.com/layers/library/alpine/${ver}"
+            badge="$(shields_static "alpine" "v${version}" "blue")"
+            link="https://hub.docker.com/layers/library/alpine/${version}"
             echo "[![alpine](${badge})](${link})"
           }
 
@@ -461,15 +514,15 @@ jobs:
 
             for V in "${VARIANTS[@]}"; do
               if ! find_image_meta "$PHP" "$V" >/dev/null; then
-                echo "Missing image-meta for ${PHP}/${V}; refusing to create incomplete release."
+                echo "Missing image metadata for ${PHP}/${V}." >&2
                 exit 1
               fi
               if ! find_trivy_sum "$PHP" "$V" >/dev/null; then
-                echo "Missing trivy summary for ${PHP}/${V}; refusing to create incomplete release."
+                echo "Missing Trivy summary for ${PHP}/${V}." >&2
                 exit 1
               fi
               if [ ! -f "artifacts/trivy-html/trivy-${PHP}-${V}.html" ]; then
-                echo "Missing trivy HTML report for ${PHP}/${V}; refusing to create incomplete release."
+                echo "Missing Trivy HTML report for ${PHP}/${V}." >&2
                 exit 1
               fi
             done
@@ -477,15 +530,11 @@ jobs:
             TAG="php-${PHP}"
             NOTES="release-notes-${PHP}.md"
 
-            # build timestamp for THIS release notes (UTC, with minutes)
             BUILT_UTC="$(date -u +%Y-%m-%d_%H:%M_UTC)"
             PHP_BADGE="$(shields_static "php" "v${PHP}" "blue")"
             BUILT_BADGE="$(shields_static "built" "${BUILT_UTC}" "blue")"
+            TRIVY_TOTAL_BADGE="$(shields_endpoint "${SITE_BASE_URL}/badges/trivy-total.json")"
 
-            TRIVY_TOTAL_ENDPOINT="${SITE_BASE_URL}/badges/trivy-total.json"
-            TRIVY_TOTAL_BADGE="$(shields_endpoint "$TRIVY_TOTAL_ENDPOINT")"
-
-            # Alpine version from meta (prefer cli, fallback first variant)
             OS_VER=""
             if find_image_meta "$PHP" "cli" >/dev/null 2>&1; then
               META_OS_FILE="$(find_image_meta "$PHP" "cli")"
@@ -499,53 +548,50 @@ jobs:
 
             {
               echo "## PHP ${PHP} images"
-              echo ""
+              echo
               echo "![php](${PHP_BADGE})"
               echo "![built](${BUILT_BADGE})"
               echo "${ALPINE_BADGE_MD}"
               echo "![trivy-total](${TRIVY_TOTAL_BADGE})"
-              echo ""
+              echo
 
-              # per-variant trivy badges (renderowane)
               for V in "${VARIANTS[@]}"; do
-                TRIVY_ENDPOINT="${SITE_BASE_URL}/badges/trivy-${PHP}-${V}.json"
-                TRIVY_BADGE="$(shields_endpoint "$TRIVY_ENDPOINT")"
+                TRIVY_BADGE="$(shields_endpoint "${SITE_BASE_URL}/badges/trivy-${PHP}-${V}.json")"
                 echo "**${V}**: ![trivy](${TRIVY_BADGE})"
               done
-              echo ""
+              echo
 
               echo "### Pull"
-              echo ""
+              echo
               echo "| Variant | Moving | Date | SHA | Digest |"
               echo "|---|---|---|---|---|"
               for V in "${VARIANTS[@]}"; do
-                F="$(find_image_meta "$PHP" "$V")"
-                SHA=$(grep '^image_sha=' "$F" | cut -d= -f2)
-                DATE=$(grep '^image_date=' "$F" | cut -d= -f2)
-                MOV=$(grep '^image_moving=' "$F" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$F" | cut -d= -f2)
+                FILE="$(find_image_meta "$PHP" "$V")"
+                SHA=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
+                DATE=$(grep '^image_date=' "$FILE" | cut -d= -f2)
+                MOV=$(grep '^image_moving=' "$FILE" | cut -d= -f2)
+                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
                 echo "| \`${V}\` | \`${MOV}\` | \`${DATE}\` | \`${SHA}\` | \`${DIG}\` |"
               done
 
-              echo ""
+              echo
               echo "### Trivy (ignore-unfixed; CRITICAL/HIGH/MEDIUM)"
-              echo ""
+              echo
               echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM | Report |"
               echo "|---|---|---:|---:|---:|---|"
               for V in "${VARIANTS[@]}"; do
-                T="$(find_trivy_sum "$PHP" "$V")"
-                IMG=$(grep '^image_sha=' "$T" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$T" | cut -d= -f2)
-                C=$(grep '^critical=' "$T" | cut -d= -f2)
-                H=$(grep '^high=' "$T" | cut -d= -f2)
-                M=$(grep '^medium=' "$T" | cut -d= -f2)
+                FILE="$(find_trivy_sum "$PHP" "$V")"
+                IMG=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
+                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
+                C=$(grep '^critical=' "$FILE" | cut -d= -f2)
+                H=$(grep '^high=' "$FILE" | cut -d= -f2)
+                M=$(grep '^medium=' "$FILE" | cut -d= -f2)
                 R="${SITE_BASE_URL}/reports/trivy-${PHP}-${V}.html"
                 echo "| \`${V}\` | \`${IMG}@${DIG}\` | $C | $H | $M | ${R} |"
               done
             } > "$NOTES"
 
             if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "Release $TAG already exists, updating notes."
               gh release edit "$TAG" \
                 --title "${PHP}" \
                 --notes-file "$NOTES"
@@ -556,34 +602,31 @@ jobs:
             fi
           done
 
-      - name: Update web badges and reports
+      - name: Update generated badge and report files
+        if: needs.discover.outputs.count != '0'
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p web/badges web/reports
 
-          # Generate per-PHP "last build" info from image-meta artifacts
-          # We prefer cli meta if present, otherwise first meta found for that PHP.
           for PHP_DIR in versions/*; do
             [ -d "$PHP_DIR" ] || continue
             PHP="$(basename "$PHP_DIR")"
 
             META_FILE=""
-            # Prefer cli if exists
-            for f in artifacts/image-meta/*.txt; do
-              [ -e "$f" ] || continue
-              if grep -q "^php=${PHP}$" "$f" && grep -q "^variant=cli$" "$f"; then
-                META_FILE="$f"
+            for file in artifacts/image-meta/*.txt; do
+              [ -e "$file" ] || continue
+              if grep -q "^php=${PHP}$" "$file" && grep -q "^variant=cli$" "$file"; then
+                META_FILE="$file"
                 break
               fi
             done
-            # Fallback: any variant
             if [ -z "$META_FILE" ]; then
-              for f in artifacts/image-meta/*.txt; do
-                [ -e "$f" ] || continue
-                if grep -q "^php=${PHP}$" "$f"; then
-                  META_FILE="$f"
+              for file in artifacts/image-meta/*.txt; do
+                [ -e "$file" ] || continue
+                if grep -q "^php=${PHP}$" "$file"; then
+                  META_FILE="$file"
                   break
                 fi
               done
@@ -595,7 +638,6 @@ jobs:
 
             DATE="$(grep '^image_date=' "$META_FILE" | cut -d= -f2 || true)"
             SHA_TAG="$(grep '^image_sha=' "$META_FILE" | cut -d= -f2 || true)"
-            # Extract last 7 from "...-sha-XXXXXXX" if present
             SHA7="$(printf '%s' "$SHA_TAG" | sed -n 's/.*-sha-\([0-9a-f]\{7\}\).*/\1/p')"
 
             [ -z "$DATE" ] && DATE="unknown"
@@ -606,21 +648,19 @@ jobs:
           EOF
           done
 
-          # Totals computed from trivy summary artifacts (not from badge JSON)
           TOTAL_C=0
           TOTAL_H=0
           TOTAL_M=0
 
-          for f in artifacts/trivy/*.txt; do
-            [ -e "$f" ] || continue
+          for file in artifacts/trivy/*.txt; do
+            [ -e "$file" ] || continue
 
-            PHP=$(grep '^php=' "$f" | cut -d= -f2)
-            VAR=$(grep '^variant=' "$f" | cut -d= -f2)
-            C=$(grep '^critical=' "$f" | cut -d= -f2)
-            H=$(grep '^high=' "$f" | cut -d= -f2)
-            M=$(grep '^medium=' "$f" | cut -d= -f2)
+            PHP=$(grep '^php=' "$file" | cut -d= -f2)
+            VAR=$(grep '^variant=' "$file" | cut -d= -f2)
+            C=$(grep '^critical=' "$file" | cut -d= -f2)
+            H=$(grep '^high=' "$file" | cut -d= -f2)
+            M=$(grep '^medium=' "$file" | cut -d= -f2)
 
-            # Defensive defaults
             C=${C:-0}
             H=${H:-0}
             M=${M:-0}
@@ -638,12 +678,10 @@ jobs:
               COLOR="yellow"
             fi
 
-            # Shields endpoint schema: do NOT add custom properties here
             cat > "web/badges/trivy-${PHP}-${VAR}.json" <<EOF
           {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
           EOF
 
-            # Optional: keep machine-readable data in a separate file (NOT used by Shields)
             cat > "web/badges/trivy-${PHP}-${VAR}.data.json" <<EOF
           {"php":"${PHP}","variant":"${VAR}","critical":${C},"high":${H},"medium":${M}}
           EOF
@@ -662,91 +700,221 @@ jobs:
             TOTAL_COLOR="yellow"
           fi
 
-          # Shields endpoint schema: do NOT add custom properties here
           cat > web/badges/trivy-total.json <<EOF
           {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}"}
           EOF
 
-          # Optional: machine-readable totals (NOT used by Shields)
           cat > web/badges/trivy-total.data.json <<EOF
           {"critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
           EOF
 
-          # Keep php.json/images.json generation (even if README doesn't show them)
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
           cat > web/badges/php.json <<EOF
           {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
           EOF
 
-          # Built with time (UTC)
           BUILT="$(date -u +%Y-%m-%d_%H:%M_UTC)"
           cat > web/badges/built.json <<EOF
           {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
           EOF
 
-          # Count only actual badge JSONs, exclude totals and *.data.json
-          IMAGES_COUNT=$(ls -1 web/badges/trivy-*.json 2>/dev/null | grep -v 'trivy-total\.json' | wc -l | tr -d ' ')
+          IMAGES_COUNT=$(find web/badges -maxdepth 1 -type f -name 'trivy-*.json' ! -name 'trivy-total.json' ! -name '*.data.json' | wc -l | tr -d ' ')
           cat > web/badges/images.json <<EOF
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
 
-          {
-            echo "<!doctype html>"
-            echo "<html><head><meta charset='utf-8'/>"
-            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-            echo "<title>Trivy reports</title>"
-            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
-            echo "</head><body>"
-            echo "<h1>Trivy HTML reports</h1>"
-            echo "<ul>"
-            for f in web/reports/trivy-*.html; do
-              [ -e "$f" ] || continue
-              base="$(basename "$f")"
-              echo "<li><a href='./${base}'>${base}</a></li>"
-            done
-            echo "</ul>"
-            echo "</body></html>"
-          } > web/reports/index.html
+      - name: Generate README
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/gen-readme.py
 
-          {
-            echo "<!doctype html>"
-            echo "<html><head><meta charset='utf-8'/>"
-            echo "<meta name='viewport' content='width=device-width, initial-scale=1'/>"
-            echo "<title>Badges</title>"
-            echo "<style>body{font-family:system-ui,Arial,sans-serif;max-width:900px;margin:24px auto;padding:0 16px} li{margin:6px 0} code{background:#f3f3f3;padding:2px 6px;border-radius:6px}</style>"
-            echo "</head><body>"
-            echo "<h1>Badges</h1>"
-            echo "<ul>"
-            for f in web/badges/*.json; do
-              [ -e "$f" ] || continue
-              base="$(basename "$f")"
-              echo "<li><a href='./${base}'>${base}</a></li>"
-            done
-            echo "</ul>"
-            echo "</body></html>"
-          } > web/badges/index.html
+      - name: Generate web catalog data
+        shell: bash
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 scripts/gen-web-catalog.py
 
-          git add web/badges web/reports
+      - name: Commit generated content if changed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add README.md web/badges web/reports web/_data
 
           if git diff --cached --quiet; then
-            echo "No web output changes."
+            echo "No generated file changes."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore(web): update badges and reports"
+          git commit -m "chore(repo): refresh generated assets"
 
-          # Handle non-fast-forward when main moved forward (race with other runs)
-          for i in 1 2 3; do
+          for attempt in 1 2 3; do
             git pull --rebase origin main || true
             if git push origin HEAD:main; then
               exit 0
             fi
-            echo "Push failed (attempt $i), retrying..."
+            echo "Push failed (attempt ${attempt}), retrying..."
             sleep 2
           done
 
-          echo "Failed to push after retries" >&2
+          echo "Failed to push generated changes after retries." >&2
           exit 1
+
+  pages-build:
+    name: build site for GitHub Pages
+    needs: update-repo
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Sync to latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout --force main
+          git reset --hard origin/main
+
+      - name: Write dynamic Jekyll config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SITE_BASE_URL}" ]; then
+            echo "Repository variable SITE_BASE_URL is required." >&2
+            exit 1
+          fi
+
+          cat > web/_config.dynamic.yml <<EOF
+          url: "${SITE_BASE_URL}"
+          EOF
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4.8"
+          bundler-cache: true
+          working-directory: web
+
+      - name: Build site
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle exec jekyll build --config _config.yml,_config.dynamic.yml -d ../_site_web
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site_web
+
+  deploy-pages:
+    name: deploy GitHub Pages
+    needs: pages-build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  deploy-rsync:
+    name: deploy site via rsync
+    needs: update-repo
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'rsync'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Sync to latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout --force main
+          git reset --hard origin/main
+
+      - name: Write dynamic Jekyll config
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SITE_BASE_URL}" ]; then
+            echo "Repository variable SITE_BASE_URL is required." >&2
+            exit 1
+          fi
+
+          cat > web/_config.dynamic.yml <<EOF
+          url: "${SITE_BASE_URL}"
+          EOF
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4.8"
+          bundler-cache: true
+          working-directory: web
+
+      - name: Build site
+        working-directory: web
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle exec jekyll build --config _config.yml,_config.dynamic.yml -d ../_site_web
+
+      - name: Install rsync
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync
+
+      # Required repository secrets for rsync deployment:
+      # - RSYNC_SSH_KEY
+      # - RSYNC_SSH_HOST
+      # - RSYNC_SSH_USER
+      # - RSYNC_SSH_PATH
+      # Optional repository secret:
+      # - RSYNC_SSH_PORT
+      - name: Setup SSH key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p ~/.ssh
+          echo "${{ secrets.RSYNC_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p "${{ secrets.RSYNC_SSH_PORT || '22' }}" "${{ secrets.RSYNC_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync to server
+        env:
+          RSYNC_HOST: ${{ secrets.RSYNC_SSH_HOST }}
+          RSYNC_USER: ${{ secrets.RSYNC_SSH_USER }}
+          RSYNC_PORT: ${{ secrets.RSYNC_SSH_PORT || '22' }}
+          RSYNC_PATH: ${{ secrets.RSYNC_SSH_PATH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -az --delete -e "ssh -p ${RSYNC_PORT}" _site_web/ "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}/"

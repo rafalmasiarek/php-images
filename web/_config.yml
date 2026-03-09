@@ -3,9 +3,12 @@ description: Multi-arch Alpine-based PHP images with Trivy reports
 theme: null
 markdown: kramdown
 
-url: "https://php-images.masiarek.dev"
+url: ""
 baseurl: ""
 
 kramdown:
   input: GFM
   hard_wrap: false
+
+plugins:
+  - jekyll-seo-tag

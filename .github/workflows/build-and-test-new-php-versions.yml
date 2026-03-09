@@ -5,13 +5,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "versions/**"
-      - ".github/workflows/build-php-versions.yml"
+      - ".github/workflows/build.yml"
   push:
     branches:
       - "bot/add-php-*"
     paths:
       - "versions/**"
-      - ".github/workflows/build-php-versions.yml"
+      - ".github/workflows/build.yml"
 
 permissions:
   contents: read
@@ -55,16 +55,23 @@ jobs:
             exit 0
           fi
 
-          python3 - <<'PY'
-          import json, os, re
+          export CHANGED="$changed"
+
+          python3 - <<'PY' > /tmp/matrix.env
+          import json
+          import os
+          import re
+
           changed = os.environ["CHANGED"].splitlines()
 
           include = []
-          for p in changed:
-            m = re.match(r"^versions/(\d+\.\d+)/(cli|fpm)/Dockerfile$", p)
+          for path in changed:
+            m = re.match(r"^versions/(\d+\.\d+)/(cli|fpm)/Dockerfile$", path)
             if not m:
               continue
-            mm, variant = m.group(1), m.group(2)
+
+            mm = m.group(1)
+            variant = m.group(2)
             include.append({
               "mm": mm,
               "variant": variant,
@@ -73,16 +80,12 @@ jobs:
               "tag": f"local/php-{mm}-{variant}:report"
             })
 
-          matrix = {"include": include}
-          print("MATRIX_JSON=" + json.dumps(matrix))
-          PY > /tmp/matrix.env
+          print("MATRIX_JSON=" + json.dumps({"include": include}))
+          PY
 
-          # Export outputs
           . /tmp/matrix.env
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
-        env:
-          CHANGED: ${{ github.event_name == 'pull_request' && '' || '' }}
 
   build:
     name: build and report
@@ -102,8 +105,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # 1) Multi-arch build (build-only validation)
-      - name: Build (linux/amd64, linux/arm64) - build-only
+      - name: Build (linux/amd64, linux/arm64) - validation only
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -114,8 +116,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # 2) Build amd64 with load for runtime inspection/report
-      - name: Build (linux/amd64) - load for report
+      - name: Build (linux/amd64) - load for report generation
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -127,13 +128,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Generate PHP report (markdown)
+      - name: Generate PHP report
         id: report
         shell: bash
         run: |
           set -euo pipefail
           img="${{ matrix.tag }}"
-
           out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
 
           {
@@ -193,7 +193,7 @@ jobs:
           name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
           path: ${{ steps.report.outputs.path }}
 
-      - name: Comment report on PR (create/update)
+      - name: Comment report on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v8
         with:
@@ -207,22 +207,27 @@ jobs:
             const issue_number = context.payload.pull_request.number;
 
             const comments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number, per_page: 100
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
             });
 
-            const existing = comments.find(c => (c.body || '').includes(marker));
+            const existing = comments.find(comment => (comment.body || '').includes(marker));
 
             if (existing) {
               await github.rest.issues.updateComment({
-                owner, repo,
+                owner,
+                repo,
                 comment_id: existing.id,
-                body
+                body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner, repo,
+                owner,
+                repo,
                 issue_number,
-                body
+                body,
               });
             }
 
@@ -233,26 +238,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: No version Dockerfiles changed
+        shell: bash
         run: |
           echo "No changes detected in versions/*/(cli|fpm)/Dockerfile. Skipping build."
 
   ci:
     name: build-php-versions (required)
-    runs-on: ubuntu-latest
     needs: [discover, build, skip]
     if: always()
+    runs-on: ubuntu-latest
     steps:
       - name: Decide final status
         shell: bash
         run: |
           set -euo pipefail
 
-          # If build ran and failed -> fail CI.
           if [ "${{ needs.build.result }}" = "failure" ] || [ "${{ needs.build.result }}" = "cancelled" ]; then
             echo "Build job failed or was cancelled."
             exit 1
           fi
 
-          # If skip ran -> succeed.
-          # If build ran and succeeded -> succeed.
           echo "CI succeeded."
