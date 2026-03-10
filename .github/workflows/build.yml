@@ -239,6 +239,74 @@ jobs:
           PREFIX="${{ matrix.php }}-${{ matrix.variant }}"
           ./scripts/compute-tags.sh "${{ steps.ns.outputs.namespace }}" "${{ env.IMAGE_NAME }}" "$PREFIX" >> "$GITHUB_OUTPUT"
 
+      - name: Fetch PHP lifecycle data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch-php-eol.py
+
+      - name: Prepare lifecycle metadata
+        id: lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          php = "${{ matrix.php }}"
+          src = Path("web/_data/php-eol.json")
+          dst = Path(".lifecycle.env")
+
+          version = php
+          eol = ""
+
+          if src.exists():
+            obj = json.loads(src.read_text(encoding="utf-8"))
+            info = obj.get(php, {})
+            version = str(info.get("version") or php)
+            eol = str(info.get("eol") or "")
+
+          built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+          dst.write_text(
+              "\n".join(
+                  [
+                      f"PHP_BRANCH={php}",
+                      f"PHP_VERSION={version}",
+                      f"PHP_EOL={eol}",
+                      f"IMAGE_BUILT_AT={built_at}",
+                      "",
+                  ]
+              ),
+              encoding="utf-8",
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"version={version}\n")
+              fh.write(f"eol={eol}\n")
+              fh.write(f"built_at={built_at}\n")
+          PY
+
+      - name: Print lifecycle metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EOL="${{ steps.lifecycle.outputs.eol }}"
+          [ -z "$EOL" ] && EOL="unknown"
+
+          {
+            echo "### PHP lifecycle"
+            echo "- PHP: \`${{ matrix.php }}\`"
+            echo "- Version: \`${{ steps.lifecycle.outputs.version }}\`"
+            echo "- EOL: \`${EOL}\`"
+            echo "- Built at: \`${{ steps.lifecycle.outputs.built_at }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -251,6 +319,10 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.lifecycle.outputs.version }}
+            org.opencontainers.image.created=${{ steps.lifecycle.outputs.built_at }}
+            org.opencontainers.image.php.branch=${{ matrix.php }}
+            org.opencontainers.image.php.eol=${{ steps.lifecycle.outputs.eol }}
 
       - name: Prepare selected hotfix directory
         shell: bash
@@ -950,6 +1022,13 @@ jobs:
           path: artifacts/trivy-html
           merge-multiple: true
 
+      - name: Fetch PHP lifecycle data for releases
+        if: needs.discover.outputs.count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch-php-eol.py
+
       - name: Create or update releases
         if: needs.discover.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
         env:
@@ -994,6 +1073,28 @@ jobs:
               fi
             done
             return 1
+          }
+
+          php_lifecycle_field() {
+            local php="$1" field="$2"
+            python3 - <<'PY' "$php" "$field"
+          import json
+          import sys
+          from pathlib import Path
+
+          php = sys.argv[1]
+          field = sys.argv[2]
+          path = Path("web/_data/php-eol.json")
+
+          if not path.exists():
+              print("")
+              raise SystemExit(0)
+
+          obj = json.loads(path.read_text(encoding="utf-8"))
+          info = obj.get(php, {})
+          value = info.get(field, "")
+          print(value if value is not None else "")
+          PY
           }
 
           urlencode() {
@@ -1065,7 +1166,12 @@ jobs:
             NOTES="release-notes-${PHP}.md"
 
             BUILT_UTC="$(date -u +%Y-%m-%d_%H:%M_UTC)"
+            PHP_VERSION_FULL="$(php_lifecycle_field "$PHP" version)"
+            PHP_EOL_DATE="$(php_lifecycle_field "$PHP" eol)"
+            [ -z "$PHP_VERSION_FULL" ] && PHP_VERSION_FULL="$PHP"
+            [ -z "$PHP_EOL_DATE" ] && PHP_EOL_DATE="unknown"
             PHP_BADGE="$(shields_static "php" "v${PHP}" "blue")"
+            EOL_BADGE="$(shields_static "eol" "${PHP_EOL_DATE}" "blue")"
             BUILT_BADGE="$(shields_static "built" "${BUILT_UTC}" "blue")"
             TRIVY_TOTAL_BADGE="$(shields_endpoint "${SITE_BASE_URL}/badges/trivy-total.json")"
 
@@ -1084,6 +1190,7 @@ jobs:
               echo "## PHP ${PHP} images"
               echo
               echo "![php](${PHP_BADGE})"
+              echo "![eol](${EOL_BADGE})"
               echo "![built](${BUILT_BADGE})"
               echo "${ALPINE_BADGE_MD}"
               echo "![trivy-total](${TRIVY_TOTAL_BADGE})"
@@ -1458,3 +1565,4 @@ jobs:
         run: |
           set -euo pipefail
           rsync -az --delete -e "ssh -p ${RSYNC_PORT}" _site_web/ "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}/"
+          

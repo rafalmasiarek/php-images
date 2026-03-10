@@ -64,6 +64,7 @@ RUN set -eux; \
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /opt/php-ext/conf.d/available/ /opt/php-ext/conf.d/available/
 COPY .hotfixes-selected/ /opt/hotfixes-selected/
+COPY .lifecycle.env /usr/local/share/php-image-lifecycle.env
 COPY rootfs/ /
 
 RUN set -eux; \
