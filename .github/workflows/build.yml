@@ -173,6 +173,7 @@ jobs:
       contents: read
       packages: write
       security-events: write
+      issues: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
@@ -273,7 +274,6 @@ jobs:
           provenance: false
           sbom: false
           cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
 
       - name: Trivy scan candidate (JSON)
         uses: aquasecurity/trivy-action@0.35.0
@@ -633,6 +633,193 @@ jobs:
           echo "Fixed CVEs: ${{ steps.remediation.outputs.fixed_cves }}"
           echo "Remaining CVEs: ${{ steps.remediation.outputs.remaining_cves }}"
           echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
+
+      - name: Create or update GitHub issue for CVEs
+        if: steps.remediation.outputs.remaining_count != '0'
+        uses: actions/github-script@v8
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+          VARIANT: ${{ matrix.variant }}
+          IMAGE_TAG: ${{ steps.tags.outputs.TAG_SHA }}
+          DIGEST: ${{ steps.finalimg.outputs.digest }}
+          REMAINING_COUNT: ${{ steps.remediation.outputs.remaining_count }}
+          NEW_COUNT: ${{ steps.remediation.outputs.new_count }}
+          REMAINING_CVES: ${{ steps.remediation.outputs.remaining_cves }}
+          NEW_CVES: ${{ steps.remediation.outputs.new_cves }}
+          SITE_BASE_URL: ${{ env.SITE_BASE_URL }}
+        with:
+          script: |
+            const crypto = require("crypto");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const php = process.env.PHP_VERSION;
+            const variant = process.env.VARIANT;
+            const imageTag = process.env.IMAGE_TAG;
+            const digest = process.env.DIGEST;
+            const remainingCount = Number(process.env.REMAINING_COUNT || "0");
+            const newCount = Number(process.env.NEW_COUNT || "0");
+            const remainingCves = (process.env.REMAINING_CVES || "").split(",").filter(Boolean).sort();
+            const newCves = (process.env.NEW_CVES || "").split(",").filter(Boolean).sort();
+            const siteBaseUrl = (process.env.SITE_BASE_URL || "").replace(/\/+$/, "");
+
+            const title = `[security] Remaining CVEs in ${php}/${variant}`;
+
+            const fingerprintSource = JSON.stringify({
+              remaining: remainingCves,
+              newlyIntroduced: newCves
+            });
+
+            const fingerprint = crypto
+              .createHash("sha256")
+              .update(fingerprintSource)
+              .digest("hex");
+
+            const marker = `<!-- cve-fingerprint:${fingerprint} -->`;
+
+            const badgeUrl = siteBaseUrl
+              ? `https://img.shields.io/endpoint?url=${encodeURIComponent(`${siteBaseUrl}/badges/trivy-${php}-${variant}.json`)}`
+              : "";
+
+            const badgeLine = badgeUrl ? `![trivy](${badgeUrl})\n\n` : "";
+
+            const summaryBlock = [
+              `- Remaining CVEs: **${remainingCount}**`,
+              `- New CVEs after rebuild: **${newCount}**`
+            ].join("\n");
+
+            const remainingBlock = remainingCves.length
+              ? remainingCves.map(cve => `- \`${cve}\``).join("\n")
+              : "- none";
+
+            const newBlock = newCves.length
+              ? newCves.map(cve => `- \`${cve}\``).join("\n")
+              : "- none";
+
+            const detailsBody = [
+              `${badgeLine}Automated security scan found unresolved vulnerabilities after rebuild.`,
+              `**Image**`,
+              `- PHP: \`${php}\``,
+              `- Variant: \`${variant}\``,
+              `- Tag: \`${imageTag}\``,
+              `- Digest: \`${digest}\``,
+              ``,
+              `**Summary**`,
+              summaryBlock,
+              ``,
+              `**Remaining CVEs**`,
+              remainingBlock,
+              ``,
+              `**New CVEs**`,
+              newBlock,
+              ``,
+              `**Run**`,
+              `- Workflow: ${context.workflow}`,
+              `- Run ID: ${context.runId}`,
+              `- Commit: \`${context.sha}\``,
+              ``,
+              marker
+            ].join("\n");
+
+            const extractFingerprint = text => {
+              const match = (text || "").match(/<!-- cve-fingerprint:([a-f0-9]{64}) -->/);
+              return match ? match[1] : "";
+            };
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              creator: "github-actions[bot]",
+              per_page: 100
+            });
+
+            const existing = issues.find(issue => issue.title === title);
+
+            if (!existing) {
+              if (newCount === 0) {
+                return;
+              }
+
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body: detailsBody
+              });
+              return;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number: existing.number,
+              per_page: 100
+            });
+
+            let lastFingerprint = extractFingerprint(existing.body);
+
+            for (const comment of comments) {
+              if (comment.user?.login !== "github-actions[bot]") {
+                continue;
+              }
+              const current = extractFingerprint(comment.body);
+              if (current) {
+                lastFingerprint = current;
+              }
+            }
+
+            if (lastFingerprint === fingerprint) {
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: existing.number,
+              body: detailsBody
+            });
+
+      - name: Close GitHub issue when no CVEs remain
+        if: steps.remediation.outputs.remaining_count == '0'
+        uses: actions/github-script@v8
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+          VARIANT: ${{ matrix.variant }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = `[security] Remaining CVEs in ${process.env.PHP_VERSION}/${process.env.VARIANT}`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              creator: "github-actions[bot]",
+              per_page: 100
+            });
+
+            const existing = issues.find(issue => issue.title === title);
+
+            if (!existing) {
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: existing.number,
+              body: "Latest automated scan shows no remaining CVEs for this image. Closing issue."
+            });
+
+            await github.rest.issues.update({
+              owner,
+              repo,
+              issue_number: existing.number,
+              state: "closed"
+            });
 
       - name: Fetch Trivy HTML template
         shell: bash
@@ -1237,13 +1424,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rsync
 
-      # Required repository secrets for rsync deployment:
-      # - RSYNC_SSH_KEY
-      # - RSYNC_SSH_HOST
-      # - RSYNC_SSH_USER
-      # - RSYNC_SSH_PATH
-      # Optional repository secret:
-      # - RSYNC_SSH_PORT
       - name: Setup SSH key
         shell: bash
         run: |
@@ -1254,6 +1434,13 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p "${{ secrets.RSYNC_SSH_PORT || '22' }}" "${{ secrets.RSYNC_SSH_HOST }}" >> ~/.ssh/known_hosts
 
+      # Required repository secrets for rsync deployment:
+      # - RSYNC_SSH_KEY
+      # - RSYNC_SSH_HOST
+      # - RSYNC_SSH_USER
+      # - RSYNC_SSH_PATH
+      # Optional repository secret:
+      # - RSYNC_SSH_PORT
       - name: Rsync to server
         env:
           RSYNC_HOST: ${{ secrets.RSYNC_SSH_HOST }}
