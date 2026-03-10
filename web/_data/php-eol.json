@@ -1,0 +1,182 @@
+{
+  "5.0": {
+    "eoas": "2005-09-05",
+    "eol": "2005-09-05",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2005-09-05",
+    "php": "5.0",
+    "release_date": "2004-07-13",
+    "version": "5.0.5"
+  },
+  "5.1": {
+    "eoas": "2006-08-24",
+    "eol": "2006-08-24",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2006-08-24",
+    "php": "5.1",
+    "release_date": "2005-11-24",
+    "version": "5.1.6"
+  },
+  "5.2": {
+    "eoas": "2008-11-02",
+    "eol": "2011-01-06",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2011-01-06",
+    "php": "5.2",
+    "release_date": "2006-11-02",
+    "version": "5.2.17"
+  },
+  "5.3": {
+    "eoas": "2011-06-30",
+    "eol": "2014-08-14",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2014-08-14",
+    "php": "5.3",
+    "release_date": "2009-06-30",
+    "version": "5.3.29"
+  },
+  "5.4": {
+    "eoas": "2014-09-14",
+    "eol": "2015-09-14",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2015-09-03",
+    "php": "5.4",
+    "release_date": "2012-03-01",
+    "version": "5.4.45"
+  },
+  "5.5": {
+    "eoas": "2015-07-10",
+    "eol": "2016-07-21",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2016-07-21",
+    "php": "5.5",
+    "release_date": "2013-06-20",
+    "version": "5.5.38"
+  },
+  "5.6": {
+    "eoas": "2017-01-19",
+    "eol": "2018-12-31",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2019-01-10",
+    "php": "5.6",
+    "release_date": "2014-08-28",
+    "version": "5.6.40"
+  },
+  "7.0": {
+    "eoas": "2018-01-04",
+    "eol": "2019-01-10",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2019-01-10",
+    "php": "7.0",
+    "release_date": "2015-12-03",
+    "version": "7.0.33"
+  },
+  "7.1": {
+    "eoas": "2018-12-01",
+    "eol": "2019-12-01",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2019-10-24",
+    "php": "7.1",
+    "release_date": "2016-12-01",
+    "version": "7.1.33"
+  },
+  "7.2": {
+    "eoas": "2019-11-30",
+    "eol": "2020-11-30",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2020-10-01",
+    "php": "7.2",
+    "release_date": "2017-11-30",
+    "version": "7.2.34"
+  },
+  "7.3": {
+    "eoas": "2020-12-06",
+    "eol": "2021-12-06",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2021-11-18",
+    "php": "7.3",
+    "release_date": "2018-12-06",
+    "version": "7.3.33"
+  },
+  "7.4": {
+    "eoas": "2021-11-28",
+    "eol": "2022-11-28",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2022-11-03",
+    "php": "7.4",
+    "release_date": "2019-11-28",
+    "version": "7.4.33"
+  },
+  "8.0": {
+    "eoas": "2022-11-26",
+    "eol": "2023-11-26",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2023-08-03",
+    "php": "8.0",
+    "release_date": "2020-11-26",
+    "version": "8.0.30"
+  },
+  "8.1": {
+    "eoas": "2023-11-25",
+    "eol": "2025-12-31",
+    "is_eol": true,
+    "is_maintained": false,
+    "latest_date": "2025-12-18",
+    "php": "8.1",
+    "release_date": "2021-11-25",
+    "version": "8.1.34"
+  },
+  "8.2": {
+    "eoas": "2024-12-31",
+    "eol": "2026-12-31",
+    "is_eol": false,
+    "is_maintained": true,
+    "latest_date": "2025-12-18",
+    "php": "8.2",
+    "release_date": "2022-12-08",
+    "version": "8.2.30"
+  },
+  "8.3": {
+    "eoas": "2025-12-31",
+    "eol": "2027-12-31",
+    "is_eol": false,
+    "is_maintained": true,
+    "latest_date": "2026-01-15",
+    "php": "8.3",
+    "release_date": "2023-11-23",
+    "version": "8.3.30"
+  },
+  "8.4": {
+    "eoas": "2026-12-31",
+    "eol": "2028-12-31",
+    "is_eol": false,
+    "is_maintained": true,
+    "latest_date": "2026-02-12",
+    "php": "8.4",
+    "release_date": "2024-11-21",
+    "version": "8.4.18"
+  },
+  "8.5": {
+    "eoas": "2027-12-31",
+    "eol": "2029-12-31",
+    "is_eol": false,
+    "is_maintained": true,
+    "latest_date": "2026-02-12",
+    "php": "8.5",
+    "release_date": "2025-11-20",
+    "version": "8.5.3"
+  }
+}

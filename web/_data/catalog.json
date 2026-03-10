@@ -12,9 +12,14 @@
   "images": [
     {
       "php": "8.2",
+      "version": "8.2.30",
+      "eol": "2026-12-31",
+      "eoas": "2024-12-31",
+      "is_maintained": true,
+      "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.2",
       "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "variants": [
         {
           "name": "cli",
@@ -46,9 +51,14 @@
     },
     {
       "php": "8.3",
+      "version": "8.3.30",
+      "eol": "2027-12-31",
+      "eoas": "2025-12-31",
+      "is_maintained": true,
+      "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.3",
       "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "variants": [
         {
           "name": "cli",
@@ -80,9 +90,14 @@
     },
     {
       "php": "8.4",
+      "version": "8.4.18",
+      "eol": "2028-12-31",
+      "eoas": "2026-12-31",
+      "is_maintained": true,
+      "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.4",
       "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "variants": [
         {
           "name": "cli",
@@ -114,9 +129,14 @@
     },
     {
       "php": "8.5",
+      "version": "8.5.3",
+      "eol": "2029-12-31",
+      "eoas": "2027-12-31",
+      "is_maintained": true,
+      "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.5",
       "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "variants": [
         {
           "name": "cli",
@@ -150,9 +170,11 @@
   "report_rows": [
     {
       "php": "8.2",
+      "version": "8.2.30",
+      "eol": "2026-12-31",
       "variant": "cli",
       "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -160,9 +182,11 @@
     },
     {
       "php": "8.2",
+      "version": "8.2.30",
+      "eol": "2026-12-31",
       "variant": "fpm",
       "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -170,9 +194,11 @@
     },
     {
       "php": "8.3",
+      "version": "8.3.30",
+      "eol": "2027-12-31",
       "variant": "cli",
       "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -180,9 +206,11 @@
     },
     {
       "php": "8.3",
+      "version": "8.3.30",
+      "eol": "2027-12-31",
       "variant": "fpm",
       "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -190,9 +218,11 @@
     },
     {
       "php": "8.4",
+      "version": "8.4.18",
+      "eol": "2028-12-31",
       "variant": "cli",
       "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -200,9 +230,11 @@
     },
     {
       "php": "8.4",
+      "version": "8.4.18",
+      "eol": "2028-12-31",
       "variant": "fpm",
       "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -210,9 +242,11 @@
     },
     {
       "php": "8.5",
+      "version": "8.5.3",
+      "eol": "2029-12-31",
       "variant": "cli",
       "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -220,9 +254,11 @@
     },
     {
       "php": "8.5",
+      "version": "8.5.3",
+      "eol": "2029-12-31",
       "variant": "fpm",
       "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-10",
-      "last_sha": "fd4a4ba",
+      "last_sha": "fb5b156",
       "critical": 0,
       "high": 0,
       "medium": 0,
