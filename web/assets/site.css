@@ -2,7 +2,6 @@
   --container-max-width: 1050px;
 }
 
-/* Header (sticky topbar) */
 .site-header{
   position: sticky;
   top: 0;
@@ -57,10 +56,9 @@
   text-decoration:none;
 }
 
-/* Badges row */
 .badges{
   display:flex;
-  gap:10px;
+  gap:.5rem;
   flex-wrap:wrap;
   align-items:center;
 }
@@ -69,48 +67,6 @@
   height: 20px;
 }
 
-/* Table controls (search + pagination) */
-.table-controls{
-  display:flex;
-  flex-wrap:wrap;
-  gap:12px;
-  align-items:center;
-  justify-content:space-between;
-  margin: 14px 0;
-  padding: 12px;
-  border: 1px solid var(--pico-muted-border-color);
-  border-radius: var(--pico-border-radius);
-  background: var(--pico-card-background-color);
-}
-
-.table-controls .left{
-  display:flex;
-  flex-wrap:wrap;
-  gap:10px;
-  align-items:center;
-}
-
-/* Slightly tighten inputs inside controls */
-.table-controls input[type="search"]{
-  min-width: 280px;
-}
-
-.table-controls select{
-  min-width: 90px;
-}
-
-.table-pager{
-  display:flex;
-  gap:10px;
-  align-items:center;
-  flex-wrap:wrap;
-}
-
-.table-pager button{
-  padding: 6px 10px;
-}
-
-/* Inline icon link (GitHub icon next to "Source") */
 .with-icon{
   display:inline-flex;
   align-items:center;
@@ -120,21 +76,6 @@
 .icon{
   display:inline-block;
   vertical-align:middle;
-}
-
-/* Make generated table a bit tighter */
-#images-table td code{
-  font-size: .9em;
-}
-
-#images-table td img{
-  height: 18px;
-  vertical-align: middle;
-}
-
-/* Keep table cells readable on narrow screens */
-#images-table td{
-  word-break: break-word;
 }
 
 .hero{
@@ -153,20 +94,112 @@
   max-height: 220px;
 }
 
-.badges{
+.images-toolbar{
   display:flex;
-  gap:.5rem;
+  justify-content:space-between;
+  align-items:end;
+  gap:var(--pico-spacing);
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  background: var(--pico-card-background-color);
   flex-wrap:wrap;
-  align-items:center;
 }
 
-.badges img{
-  height: 20px;
+.images-toolbar .left,
+.images-toolbar .right{
+  display:flex;
+  align-items:end;
+  gap:calc(var(--pico-spacing) * 0.75);
+  flex-wrap:wrap;
+}
+
+.images-toolbar input[type="search"]{
+  min-width:min(28rem, 100%);
+  margin-bottom:0;
+}
+
+.images-toolbar label{
+  margin-bottom:0;
+  white-space:nowrap;
+}
+
+.images-toolbar select,
+.images-toolbar button{
+  margin-bottom:0;
+}
+
+.images-status{
+  color: var(--pico-muted-color);
+  white-space:nowrap;
+}
+
+.images-table-wrap{
+  margin-top: var(--pico-spacing);
+}
+
+.images-table{
+  width:100%;
+  font-size:0.95rem;
+}
+
+.images-table th,
+.images-table td{
+  vertical-align:top;
+}
+
+.images-table td{
+  word-break:break-word;
+}
+
+.images-table td code,
+.images-table th code{
+  white-space:nowrap;
+  font-size:0.875em;
+}
+
+.images-table td img{
+  height:18px;
+  vertical-align:middle;
+}
+
+.images-table .metric{
+  white-space:nowrap;
+}
+
+.images-table .muted{
+  color: var(--pico-muted-color);
+}
+
+.images-empty{
+  text-align:center;
+  color: var(--pico-muted-color);
+}
+
+@media (max-width: 768px){
+  .images-toolbar{
+    align-items:stretch;
+  }
+
+  .images-toolbar .left,
+  .images-toolbar .right{
+    width:100%;
+  }
+
+  .images-toolbar input[type="search"]{
+    min-width:0;
+    width:100%;
+  }
+
+  .images-toolbar label{
+    flex:1 1 auto;
+  }
 }
 
 @media (max-width: 700px){
   .header-inner{
-    flex-direction: column;
+    flex-direction:column;
     align-items:flex-start;
   }
 
@@ -174,21 +207,21 @@
     justify-content:flex-start;
   }
 
-  .table-controls{
-    align-items: stretch;
+  .images-toolbar{
+    align-items:stretch;
   }
 
-  .table-controls .left{
-    width: 100%;
+  .images-toolbar .left,
+  .images-toolbar .right{
+    width:100%;
   }
 
-  .table-controls input[type="search"]{
-    width: 100%;
-    min-width: 0;
+  .images-toolbar input[type="search"]{
+    width:100%;
+    min-width:0;
   }
 
-  .table-pager{
-    width: 100%;
-    justify-content: space-between;
+  .images-toolbar .right{
+    justify-content:space-between;
   }
 }

@@ -104,6 +104,21 @@ def load_last_build(php: str) -> tuple[str, str]:
         return "-", "-"
 
 
+def load_php_eol_data() -> dict[str, dict[str, str | bool]]:
+    path = ROOT / "web" / "_data" / "php-eol.json"
+    if not path.exists():
+        return {}
+
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    return {}
+
+
 def php_key(value: str) -> tuple[int, ...]:
     try:
         return tuple(int(part) for part in value.split("."))
@@ -112,6 +127,7 @@ def php_key(value: str) -> tuple[int, ...]:
 
 
 data: dict[str, dict[str, dict[str, str]]] = {}
+php_eol_data = load_php_eol_data()
 
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     php = dockerfile.parts[-3]
@@ -123,13 +139,16 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     }
 
 table = [
-    "| PHP | Last build | SHA | Tags | OS | Trivy |",
-    "| - | - | - | - | - | - |",
+    "| PHP | Version | EOL | Last build | SHA | Tags | OS | Trivy |",
+    "| - | - | - | - | - | - | - | - |",
 ]
 
 for php in sorted(data.keys(), key=php_key):
     variants = data[php]
     last_date, last_sha = load_last_build(php)
+    eol_info = php_eol_data.get(php, {})
+    version = str(eol_info.get("version") or php)
+    eol = str(eol_info.get("eol") or "-")
 
     tags_lines: list[str] = []
     os_lines: list[str] = []
@@ -146,6 +165,10 @@ for php in sorted(data.keys(), key=php_key):
     table.append(
         "| "
         + php_cell
+        + " | "
+        + f"`{version}`"
+        + " | "
+        + f"`{eol}`"
         + " | "
         + f"`{last_date}`"
         + " | "

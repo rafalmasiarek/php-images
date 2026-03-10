@@ -94,8 +94,24 @@ def load_trivy_counts(php: str, variant: str) -> dict[str, int]:
         return {"critical": 0, "high": 0, "medium": 0}
 
 
+def load_php_eol_data() -> dict[str, dict[str, str | bool]]:
+    path = ROOT / "web" / "_data" / "php-eol.json"
+    if not path.exists():
+        return {}
+
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    return {}
+
+
 catalog_images: list[dict] = []
 report_rows: list[dict] = []
+php_eol_data = load_php_eol_data()
 
 versions: dict[str, list[Path]] = {}
 for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
@@ -104,6 +120,12 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
 
 for php in sorted(versions.keys(), key=php_key):
     last_build, last_sha = load_last_build(php)
+    eol_info = php_eol_data.get(php, {})
+    php_version = str(eol_info.get("version") or php)
+    php_eol = str(eol_info.get("eol") or "")
+    php_eoas = str(eol_info.get("eoas") or "")
+    php_is_maintained = bool(eol_info.get("is_maintained", False))
+    php_is_eol = bool(eol_info.get("is_eol", False))
     variants: list[dict] = []
 
     for dockerfile in sorted(versions[php], key=lambda p: p.parts[-2]):
@@ -141,6 +163,8 @@ for php in sorted(versions.keys(), key=php_key):
         report_rows.append(
             {
                 "php": php,
+                "version": php_version,
+                "eol": php_eol,
                 "variant": variant,
                 "last_build": last_build,
                 "last_sha": last_sha,
@@ -154,6 +178,11 @@ for php in sorted(versions.keys(), key=php_key):
     catalog_images.append(
         {
             "php": php,
+            "version": php_version,
+            "eol": php_eol,
+            "eoas": php_eoas,
+            "is_maintained": php_is_maintained,
+            "is_eol": php_is_eol,
             "release_url": release_url_for_php(php),
             "last_build": last_build,
             "last_sha": last_sha,

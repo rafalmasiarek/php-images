@@ -1,0 +1,120 @@
+name: watch-php-eol
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-eol:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check PHP EOL and open issues
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const versionsDir = path.join(process.env.GITHUB_WORKSPACE, "versions");
+            const existingVersions = fs.existsSync(versionsDir)
+              ? fs.readdirSync(versionsDir, { withFileTypes: true })
+                  .filter((entry) => entry.isDirectory())
+                  .map((entry) => entry.name)
+                  .sort()
+              : [];
+
+            if (existingVersions.length === 0) {
+              core.info("No PHP versions found in versions/.");
+              return;
+            }
+
+            const response = await fetch("https://endoflife.date/api/v1/products/php/");
+            if (!response.ok) {
+              core.setFailed(`endoflife.date request failed: ${response.status}`);
+              return;
+            }
+
+            const payload = await response.json();
+            const releases = payload?.result?.releases || [];
+
+            const eolMap = new Map();
+            for (const rel of releases) {
+              const php = String(rel?.name || "").trim();
+              if (!php) continue;
+
+              eolMap.set(php, {
+                php,
+                version: String(rel?.latest?.name || php),
+                eol: String(rel?.eolFrom || ""),
+                isEol: Boolean(rel?.isEol),
+                isMaintained: Boolean(rel?.isMaintained),
+              });
+            }
+
+            const today = new Date().toISOString().slice(0, 10);
+            const due = [];
+
+            for (const php of existingVersions) {
+              const info = eolMap.get(php);
+              if (!info || !info.eol) continue;
+
+              if (info.isEol || info.eol <= today) {
+                due.push(info);
+              }
+            }
+
+            core.info(`Found ${due.length} EOL branch(es).`);
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: "open",
+              creator: "github-actions[bot]",
+              per_page: 100
+            });
+
+            for (const item of due) {
+              const title = `[eol] Remove PHP ${item.php} images`;
+              const marker = `<!-- php-eol:${item.php} -->`;
+
+              const body = [
+                `PHP branch \`${item.php}\` is end-of-life and should be removed from the repository.`,
+                ``,
+                `- Branch: \`${item.php}\``,
+                `- Latest known release: \`${item.version}\``,
+                `- EOL date: \`${item.eol}\``,
+                ``,
+                `Suggested actions:`,
+                `- remove \`versions/${item.php}\``,
+                `- stop publishing tags for \`${item.php}\``,
+                `- remove generated references from README and catalog`,
+                ``,
+                marker
+              ].join("\n");
+
+              const existing = issues.find((issue) => issue.title === title);
+              if (existing) {
+                core.info(`Issue already exists for ${item.php}`);
+                continue;
+              }
+
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body
+              });
+
+              core.info(`Created issue for ${item.php}`);
+            }

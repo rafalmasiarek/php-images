@@ -1,0 +1,186 @@
+<div class="images-toolbar">
+  <div class="left">
+    <input id="table-search" type="search" placeholder="Search (php, version, variant, tag, sha)..." autocomplete="off" />
+    <label>
+      Rows
+      <select id="table-page-size">
+        <option>10</option>
+        <option selected>25</option>
+        <option>50</option>
+        <option>100</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="right">
+    <button id="table-prev" type="button" class="secondary">Prev</button>
+    <span id="table-status" class="images-status">Page 1/1</span>
+    <button id="table-next" type="button" class="secondary">Next</button>
+  </div>
+</div>
+
+<div class="overflow-auto images-table-wrap">
+  <table id="images-table" class="images-table">
+    <thead>
+      <tr>
+        <th scope="col">PHP</th>
+        <th scope="col">Version</th>
+        <th scope="col">EOL</th>
+        <th scope="col">Variant</th>
+        <th scope="col">Tag</th>
+        <th scope="col">OS</th>
+        <th scope="col">Last build</th>
+        <th scope="col">SHA</th>
+        <th scope="col">Trivy</th>
+        <th scope="col">Release</th>
+        <th scope="col">Report</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% assign images = site.data.catalog.images | sort: "php" %}
+      {% for image in images %}
+        {% assign php = image.php %}
+        {% assign version = image.version | default: image.php %}
+        {% assign eol = image.eol | default: "-" %}
+        {% assign last_build = image.last_build | default: "-" %}
+        {% assign last_sha = image.last_sha | default: "-" %}
+        {% assign release_url = image.release_url %}
+        {% assign variants = image.variants | sort: "name" %}
+
+        {% for variant in variants %}
+          <tr>
+            <th scope="row">
+              <a href="{{ release_url }}">{{ php }}</a>
+            </th>
+            <td><code>{{ version }}</code></td>
+            <td>
+              {% if eol == "" or eol == "-" %}
+                <span class="muted">-</span>
+              {% else %}
+                <code>{{ eol }}</code>
+              {% endif %}
+            </td>
+            <td>{{ variant.name }}</td>
+            <td><code>{{ variant.tag }}</code></td>
+            <td>
+              {% if variant.os_layers_url and variant.os_layers_url != "" %}
+                <a href="{{ variant.os_layers_url }}">Alpine {{ variant.os }}</a>
+              {% else %}
+                <span class="muted">{{ variant.os }}</span>
+              {% endif %}
+            </td>
+            <td><code>{{ last_build }}</code></td>
+            <td><code>{{ last_sha }}</code></td>
+            <td class="metric">
+              C:{{ variant.critical | default: 0 }}
+              H:{{ variant.high | default: 0 }}
+              M:{{ variant.medium | default: 0 }}
+            </td>
+            <td><a href="{{ release_url }}">Notes</a></td>
+            <td><a href="{{ variant.report_relative_url }}">HTML</a></td>
+          </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+(() => {
+  const table = document.getElementById('images-table');
+  if (!table) return;
+
+  const tbody = table.tBodies[0];
+  const allRows = Array.from(tbody.rows);
+
+  const searchEl = document.getElementById('table-search');
+  const pageSizeEl = document.getElementById('table-page-size');
+  const prevEl = document.getElementById('table-prev');
+  const nextEl = document.getElementById('table-next');
+  const statusEl = document.getElementById('table-status');
+
+  let query = '';
+  let pageSize = parseInt(pageSizeEl.value, 10) || 25;
+  let page = 1;
+
+  const norm = (s) => (s || '').toLowerCase().trim();
+
+  function getFilteredRows() {
+    const q = norm(query);
+    if (!q) return allRows;
+    return allRows.filter((row) => norm(row.innerText).includes(q));
+  }
+
+  function renderEmptyRow(colspan) {
+    const existing = document.getElementById('images-empty-row');
+    if (existing) existing.remove();
+
+    const rows = getFilteredRows();
+    if (rows.length > 0) return;
+
+    const tr = document.createElement('tr');
+    tr.id = 'images-empty-row';
+
+    const td = document.createElement('td');
+    td.colSpan = colspan;
+    td.className = 'images-empty';
+    td.textContent = 'No matching rows';
+
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  function render() {
+    const rows = getFilteredRows();
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+
+    page = Math.min(page, pages);
+    page = Math.max(page, 1);
+
+    allRows.forEach((row) => {
+      row.style.display = 'none';
+    });
+
+    const emptyRow = document.getElementById('images-empty-row');
+    if (emptyRow) emptyRow.remove();
+
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+
+    rows.slice(start, end).forEach((row) => {
+      row.style.display = '';
+    });
+
+    renderEmptyRow(table.tHead.rows[0].cells.length);
+
+    statusEl.textContent = `Page ${page}/${pages} · ${total} rows`;
+    prevEl.disabled = page <= 1;
+    nextEl.disabled = page >= pages || total === 0;
+  }
+
+  searchEl.addEventListener('input', () => {
+    query = searchEl.value;
+    page = 1;
+    render();
+  });
+
+  pageSizeEl.addEventListener('change', () => {
+    pageSize = parseInt(pageSizeEl.value, 10) || 25;
+    page = 1;
+    render();
+  });
+
+  prevEl.addEventListener('click', () => {
+    page -= 1;
+    render();
+  });
+
+  nextEl.addEventListener('click', () => {
+    page += 1;
+    render();
+  });
+
+  render();
+})();
+</script>

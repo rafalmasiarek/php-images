@@ -8,6 +8,7 @@ on:
       - "rootfs/**"
       - "hotfixes/**"
       - "scripts/compute-tags.sh"
+      - "scripts/fetch-php-eol.py"
       - "scripts/gen-readme.py"
       - "scripts/gen-web-catalog.py"
       - "web/_config.yml"
@@ -1256,6 +1257,12 @@ jobs:
           cat > web/badges/images.json <<EOF
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
+
+      - name: Fetch PHP lifecycle data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/fetch-php-eol.py
 
       - name: Generate README
         shell: bash
