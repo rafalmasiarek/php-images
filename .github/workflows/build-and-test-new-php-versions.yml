@@ -108,22 +108,26 @@ jobs:
       - name: Build (linux/amd64, linux/arm64) - validation only
         uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.context }}
+          context: .
           file: ${{ matrix.dockerfile }}
           push: false
           load: false
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            PECL_FILE=${{ matrix.context }}/pecl.txt
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Build (linux/amd64) - load for report generation
         uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.context }}
+          context: .
           file: ${{ matrix.dockerfile }}
           push: false
           load: true
           platforms: linux/amd64
+          build-args: |
+            PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: ${{ matrix.tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
