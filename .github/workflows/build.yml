@@ -1565,9 +1565,9 @@ jobs:
             url="${url//\//%2F}"
             url="${url//\?/%3F}"
             url="${url//&/%26}"
-            echo "https://img.shields.io/endpoint?url=${url}&v=${v}"
+            echo "https://img.shields.io/endpoint?url=${url}&cacheSeconds=300&v=${v}"
           }
-
+          
           shields_static() {
             local label message color v
             label="$(urlencode "$1")"
