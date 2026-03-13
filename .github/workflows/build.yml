@@ -416,6 +416,7 @@ jobs:
 
           rm -rf .hotfixes-selected
           mkdir -p .hotfixes-selected
+          : > .hotfixes-selected-files.txt
 
           mapfile -t CVES < <(
             jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
@@ -458,6 +459,7 @@ jobs:
                 dest=".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
                 cp "$f" "$dest"
                 SELECTED_FILES+=("$f")
+                printf '%s\n' "$f" >> .hotfixes-selected-files.txt
                 matched_this_cve=1
                 found=1
               done
@@ -707,193 +709,6 @@ jobs:
           echo "Remaining CVEs: ${{ steps.remediation.outputs.remaining_cves }}"
           echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
 
-      - name: Create or update GitHub issue for CVEs
-        if: steps.remediation.outputs.remaining_count != '0'
-        uses: actions/github-script@v8
-        env:
-          PHP_VERSION: ${{ matrix.php }}
-          VARIANT: ${{ matrix.variant }}
-          IMAGE_TAG: ${{ steps.tags.outputs.TAG_SHA }}
-          DIGEST: ${{ steps.finalimg.outputs.digest }}
-          REMAINING_COUNT: ${{ steps.remediation.outputs.remaining_count }}
-          NEW_COUNT: ${{ steps.remediation.outputs.new_count }}
-          REMAINING_CVES: ${{ steps.remediation.outputs.remaining_cves }}
-          NEW_CVES: ${{ steps.remediation.outputs.new_cves }}
-          SITE_BASE_URL: ${{ env.SITE_BASE_URL }}
-        with:
-          script: |
-            const crypto = require("crypto");
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-
-            const php = process.env.PHP_VERSION;
-            const variant = process.env.VARIANT;
-            const imageTag = process.env.IMAGE_TAG;
-            const digest = process.env.DIGEST;
-            const remainingCount = Number(process.env.REMAINING_COUNT || "0");
-            const newCount = Number(process.env.NEW_COUNT || "0");
-            const remainingCves = (process.env.REMAINING_CVES || "").split(",").filter(Boolean).sort();
-            const newCves = (process.env.NEW_CVES || "").split(",").filter(Boolean).sort();
-            const siteBaseUrl = (process.env.SITE_BASE_URL || "").replace(/\/+$/, "");
-
-            const title = `[security] Remaining CVEs in ${php}/${variant}`;
-
-            const fingerprintSource = JSON.stringify({
-              remaining: remainingCves,
-              newlyIntroduced: newCves
-            });
-
-            const fingerprint = crypto
-              .createHash("sha256")
-              .update(fingerprintSource)
-              .digest("hex");
-
-            const marker = `<!-- cve-fingerprint:${fingerprint} -->`;
-
-            const badgeUrl = siteBaseUrl
-              ? `https://img.shields.io/endpoint?url=${encodeURIComponent(`${siteBaseUrl}/badges/trivy-${php}-${variant}.json`)}`
-              : "";
-
-            const badgeLine = badgeUrl ? `![trivy](${badgeUrl})\n\n` : "";
-
-            const summaryBlock = [
-              `- Remaining CVEs: **${remainingCount}**`,
-              `- New CVEs after rebuild: **${newCount}**`
-            ].join("\n");
-
-            const remainingBlock = remainingCves.length
-              ? remainingCves.map(cve => `- \`${cve}\``).join("\n")
-              : "- none";
-
-            const newBlock = newCves.length
-              ? newCves.map(cve => `- \`${cve}\``).join("\n")
-              : "- none";
-
-            const detailsBody = [
-              `${badgeLine}Automated security scan found unresolved vulnerabilities after rebuild.`,
-              `**Image**`,
-              `- PHP: \`${php}\``,
-              `- Variant: \`${variant}\``,
-              `- Tag: \`${imageTag}\``,
-              `- Digest: \`${digest}\``,
-              ``,
-              `**Summary**`,
-              summaryBlock,
-              ``,
-              `**Remaining CVEs**`,
-              remainingBlock,
-              ``,
-              `**New CVEs**`,
-              newBlock,
-              ``,
-              `**Run**`,
-              `- Workflow: ${context.workflow}`,
-              `- Run ID: ${context.runId}`,
-              `- Commit: \`${context.sha}\``,
-              ``,
-              marker
-            ].join("\n");
-
-            const extractFingerprint = text => {
-              const match = (text || "").match(/<!-- cve-fingerprint:([a-f0-9]{64}) -->/);
-              return match ? match[1] : "";
-            };
-
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner,
-              repo,
-              state: "open",
-              creator: "github-actions[bot]",
-              per_page: 100
-            });
-
-            const existing = issues.find(issue => issue.title === title);
-
-            if (!existing) {
-              if (newCount === 0) {
-                return;
-              }
-
-              await github.rest.issues.create({
-                owner,
-                repo,
-                title,
-                body: detailsBody
-              });
-              return;
-            }
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner,
-              repo,
-              issue_number: existing.number,
-              per_page: 100
-            });
-
-            let lastFingerprint = extractFingerprint(existing.body);
-
-            for (const comment of comments) {
-              if (comment.user?.login !== "github-actions[bot]") {
-                continue;
-              }
-              const current = extractFingerprint(comment.body);
-              if (current) {
-                lastFingerprint = current;
-              }
-            }
-
-            if (lastFingerprint === fingerprint) {
-              return;
-            }
-
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: existing.number,
-              body: detailsBody
-            });
-
-      - name: Close GitHub issue when no CVEs remain
-        if: steps.remediation.outputs.remaining_count == '0'
-        uses: actions/github-script@v8
-        env:
-          PHP_VERSION: ${{ matrix.php }}
-          VARIANT: ${{ matrix.variant }}
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const title = `[security] Remaining CVEs in ${process.env.PHP_VERSION}/${process.env.VARIANT}`;
-
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner,
-              repo,
-              state: "open",
-              creator: "github-actions[bot]",
-              per_page: 100
-            });
-
-            const existing = issues.find(issue => issue.title === title);
-
-            if (!existing) {
-              return;
-            }
-
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number: existing.number,
-              body: "Latest automated scan shows no remaining CVEs for this image. Closing issue."
-            });
-
-            await github.rest.issues.update({
-              owner,
-              repo,
-              issue_number: existing.number,
-              state: "closed"
-            });
-
       - name: Fetch Trivy HTML template
         shell: bash
         run: |
@@ -913,6 +728,24 @@ jobs:
 
       - name: Write image and scan artifacts
         shell: bash
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+          VARIANT: ${{ matrix.variant }}
+          IMAGE_SHA: ${{ steps.tags.outputs.TAG_SHA }}
+          IMAGE_DATE: ${{ steps.tags.outputs.TAG_DATE }}
+          IMAGE_MOVING: ${{ steps.tags.outputs.TAG_MOVING }}
+          DIGEST: ${{ steps.finalimg.outputs.digest }}
+          HOTFIX_ENABLED: ${{ steps.hotfixes.outputs.enabled }}
+          MATCHED_CVES: ${{ steps.hotfixes.outputs.matched_cves }}
+          UNMATCHED_CVES: ${{ steps.hotfixes.outputs.unmatched_cves }}
+          SELECTED_COUNT: ${{ steps.hotfixes.outputs.selected_count }}
+          FIXED_CVES: ${{ steps.remediation.outputs.fixed_cves }}
+          REMAINING_CVES: ${{ steps.remediation.outputs.remaining_cves }}
+          NEW_CVES: ${{ steps.remediation.outputs.new_cves }}
+          ALPINE_IMAGE_FULL: ${{ steps.alpine.outputs.image_full }}
+          ALPINE_IMAGE_MINOR: ${{ steps.alpine.outputs.image_minor }}
+          ALPINE_DOCKERFILE_FULL: ${{ steps.alpine.outputs.dockerfile_full }}
+          ALPINE_DOCKERFILE_MINOR: ${{ steps.alpine.outputs.dockerfile_minor }}
         run: |
           set -euo pipefail
 
@@ -930,6 +763,8 @@ jobs:
 
           META="out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt"
           SUM="out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt"
+          HOTFIX_META="out/hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}.json"
+          VULNS="out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json"
 
           cat > "$META" <<EOF
           php=${{ matrix.php }}
@@ -951,6 +786,90 @@ jobs:
           medium=${MED}
           EOF
 
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def csv_list(value: str) -> list[str]:
+              return [item for item in (value or "").split(",") if item]
+
+          php = os.environ["PHP_VERSION"]
+          variant = os.environ["VARIANT"]
+          image_sha = os.environ["IMAGE_SHA"]
+          image_date = os.environ["IMAGE_DATE"]
+          image_moving = os.environ["IMAGE_MOVING"]
+          digest = os.environ["DIGEST"]
+          hotfix_enabled = (os.environ.get("HOTFIX_ENABLED", "").lower() == "true")
+          selected_count = int(os.environ.get("SELECTED_COUNT") or "0")
+          matched_cves = csv_list(os.environ.get("MATCHED_CVES", ""))
+          unmatched_cves = csv_list(os.environ.get("UNMATCHED_CVES", ""))
+          fixed_cves = csv_list(os.environ.get("FIXED_CVES", ""))
+          remaining_cves = csv_list(os.environ.get("REMAINING_CVES", ""))
+          new_cves = csv_list(os.environ.get("NEW_CVES", ""))
+          alpine_full = os.environ.get("ALPINE_IMAGE_FULL") or os.environ.get("ALPINE_DOCKERFILE_FULL") or "unknown"
+          alpine_minor = os.environ.get("ALPINE_IMAGE_MINOR") or os.environ.get("ALPINE_DOCKERFILE_MINOR") or "unknown"
+
+          selected_scripts_path = Path(".hotfixes-selected-files.txt")
+          selected_scripts = []
+          if selected_scripts_path.exists():
+              selected_scripts = [line.strip() for line in selected_scripts_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+          hotfix_meta = {
+              "php": php,
+              "variant": variant,
+              "alpine_minor": alpine_minor,
+              "alpine_full": alpine_full,
+              "image_sha": image_sha,
+              "image_date": image_date,
+              "image_moving": image_moving,
+              "digest": digest,
+              "hotfix_enabled": hotfix_enabled,
+              "selected_count": selected_count,
+              "matched_cves": matched_cves,
+              "unmatched_cves": unmatched_cves,
+              "fixed_cves": fixed_cves,
+              "remaining_cves": remaining_cves,
+              "new_cves": new_cves,
+              "selected_scripts": selected_scripts,
+          }
+
+          Path(f"out/hotfix-meta-{php}-{variant}.json").write_text(
+              json.dumps(hotfix_meta, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          trivy = json.loads(Path("trivy-results.json").read_text(encoding="utf-8"))
+          records = []
+
+          for result in trivy.get("Results") or []:
+              for vuln in result.get("Vulnerabilities") or []:
+                  records.append(
+                      {
+                          "php": php,
+                          "variant": variant,
+                          "alpine_minor": alpine_minor,
+                          "alpine_full": alpine_full,
+                          "image_sha": image_sha,
+                          "image_date": image_date,
+                          "image_moving": image_moving,
+                          "digest": digest,
+                          "package": vuln.get("PkgName") or "",
+                          "installed_version": vuln.get("InstalledVersion") or "",
+                          "fixed_version": vuln.get("FixedVersion") or "",
+                          "severity": vuln.get("Severity") or "UNKNOWN",
+                          "cve": vuln.get("VulnerabilityID") or "",
+                          "title": vuln.get("Title") or "",
+                          "primary_url": vuln.get("PrimaryURL") or "",
+                      }
+                  )
+
+          Path(f"out/vulns-{php}-{variant}.json").write_text(
+              json.dumps(records, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
           cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
 
       - uses: actions/upload-artifact@v7
@@ -971,9 +890,422 @@ jobs:
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulns-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json
+          if-no-files-found: error
+
+  sync-security-issues:
+    name: sync security issues
+    needs: [discover, build]
+    if: github.ref == 'refs/heads/main' && always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Validate upstream jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ needs.discover.outputs.count }}" != "0" ] && [ "${{ needs.build.result }}" != "success" ]; then
+            echo "Build job did not complete successfully." >&2
+            exit 1
+          fi
+
+      - name: Download vulnerability artifacts
+        if: needs.discover.outputs.count != '0'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: vulns-*
+          path: artifacts/vulns
+          merge-multiple: true
+
+      - name: Download hotfix metadata artifacts
+        if: needs.discover.outputs.count != '0'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: hotfix-meta-*
+          path: artifacts/hotfix-meta
+          merge-multiple: true
+
+      - name: Build aggregated vulnerability groups
+        if: needs.discover.outputs.count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          from collections import defaultdict
+          from pathlib import Path
+          import os
+
+          severity_rank = {
+              "UNKNOWN": 0,
+              "LOW": 1,
+              "MEDIUM": 2,
+              "HIGH": 3,
+              "CRITICAL": 4,
+          }
+
+          hotfix_by_variant = {}
+          for path in sorted(Path("artifacts/hotfix-meta").glob("*.json")):
+              obj = json.loads(path.read_text(encoding="utf-8"))
+              hotfix_by_variant[(obj.get("php", ""), obj.get("variant", ""))] = obj
+
+          groups = {}
+
+          for path in sorted(Path("artifacts/vulns").glob("*.json")):
+              items = json.loads(path.read_text(encoding="utf-8"))
+              for item in items:
+                  cve = item.get("cve") or ""
+                  php = item.get("php") or ""
+                  alpine_minor = item.get("alpine_minor") or "unknown"
+                  if not cve or not php:
+                      continue
+
+                  key = f"{php}|{alpine_minor}|{cve}"
+                  group = groups.setdefault(
+                      key,
+                      {
+                          "php": php,
+                          "alpine_minor": alpine_minor,
+                          "cve": cve,
+                          "severity": "UNKNOWN",
+                          "alpine_full_versions": set(),
+                          "variants": set(),
+                          "packages": set(),
+                          "fixed_versions": set(),
+                          "primary_urls": set(),
+                          "images": [],
+                          "matched_hotfix_scripts": set(),
+                      },
+                  )
+
+                  current_severity = item.get("severity") or "UNKNOWN"
+                  if severity_rank.get(current_severity, 0) > severity_rank.get(group["severity"], 0):
+                      group["severity"] = current_severity
+
+                  if item.get("alpine_full"):
+                      group["alpine_full_versions"].add(item["alpine_full"])
+                  if item.get("variant"):
+                      group["variants"].add(item["variant"])
+                  if item.get("package"):
+                      group["packages"].add(item["package"])
+                  if item.get("fixed_version"):
+                      group["fixed_versions"].add(item["fixed_version"])
+                  if item.get("primary_url"):
+                      group["primary_urls"].add(item["primary_url"])
+
+                  group["images"].append(
+                      {
+                          "variant": item.get("variant") or "unknown",
+                          "image_sha": item.get("image_sha") or "",
+                          "digest": item.get("digest") or "",
+                      }
+                  )
+
+                  variant_key = (php, item.get("variant") or "")
+                  hotfix_meta = hotfix_by_variant.get(variant_key, {})
+                  for script in hotfix_meta.get("selected_scripts") or []:
+                      name = os.path.basename(script)
+                      if name.startswith(f"{cve}-"):
+                          group["matched_hotfix_scripts"].add(script)
+
+          normalized = []
+          for group in groups.values():
+              images = []
+              seen_images = set()
+              for image in sorted(group["images"], key=lambda x: (x["variant"], x["image_sha"], x["digest"])):
+                  key = (image["variant"], image["image_sha"], image["digest"])
+                  if key in seen_images:
+                      continue
+                  seen_images.add(key)
+                  images.append(image)
+
+              normalized.append(
+                  {
+                      "php": group["php"],
+                      "alpine_minor": group["alpine_minor"],
+                      "cve": group["cve"],
+                      "severity": group["severity"],
+                      "alpine_full_versions": sorted(group["alpine_full_versions"]),
+                      "variants": sorted(group["variants"]),
+                      "packages": sorted(group["packages"]),
+                      "fixed_versions": sorted(group["fixed_versions"]),
+                      "primary_urls": sorted(group["primary_urls"]),
+                      "images": images,
+                      "matched_hotfix_scripts": sorted(group["matched_hotfix_scripts"]),
+                      "matched_hotfix_scripts_count": len(group["matched_hotfix_scripts"]),
+                  }
+              )
+
+          Path("aggregated-vulns.json").write_text(
+              json.dumps(sorted(normalized, key=lambda x: (x["php"], x["alpine_minor"], x["cve"])), indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Create, update, and close security issues
+        if: needs.discover.outputs.count != '0'
+        uses: actions/github-script@v8
+        env:
+          FULL_BUILD: ${{ needs.discover.outputs.full }}
+        with:
+          script: |
+            const fs = require("fs");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const fullBuild = String(process.env.FULL_BUILD || "").toLowerCase() === "true";
+            const groups = JSON.parse(fs.readFileSync("aggregated-vulns.json", "utf8"));
+
+            const ensureLabel = async (name, color, description) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name,
+                  color,
+                  description,
+                });
+              }
+            };
+
+            const parseMarkerList = (text, key) => {
+              const re = new RegExp(`<!-- ${key}:([^>]*) -->`);
+              const match = (text || "").match(re);
+              if (!match) {
+                return [];
+              }
+              return match[1]
+                .split(",")
+                .map(v => v.trim())
+                .filter(Boolean)
+                .sort();
+            };
+
+            const parseMarkerValue = (text, key) => {
+              const re = new RegExp(`<!-- ${key}:([^>]*) -->`);
+              const match = (text || "").match(re);
+              return match ? match[1].trim() : "";
+            };
+
+            const toBulletList = values =>
+              values.length ? values.map(v => `- \`${v}\``).join("\n") : "- none";
+
+            const uniq = values => [...new Set(values)].sort();
+
+            const diff = (previous, current) => ({
+              added: current.filter(v => !previous.includes(v)),
+              removed: previous.filter(v => !current.includes(v)),
+            });
+
+            await ensureLabel("security", "b60205", "Security issue");
+            await ensureLabel("trivy", "5319e7", "Detected by Trivy");
+
+            const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
+            });
+
+            const managedOpenIssues = openIssues.filter(issue =>
+              (issue.body || "").includes("<!-- managed-by: trivy-cve-sync -->")
+            );
+
+            const currentKeys = new Set();
+
+            for (const group of groups) {
+              const phpLabel = `php-${group.php}`;
+              const alpineLabel = `alpine-${group.alpine_minor}`;
+              const cveLabel = `cve:${group.cve}`;
+
+              await ensureLabel(phpLabel, "0e8a16", `PHP branch ${group.php}`);
+              await ensureLabel(alpineLabel, "1d76db", `Alpine ${group.alpine_minor}`);
+              await ensureLabel(cveLabel, "d93f0b", `CVE ${group.cve}`);
+
+              const title = `Security: ${group.cve} affects PHP ${group.php} images based on Alpine ${group.alpine_minor}`;
+              const labels = ["security", "trivy", phpLabel, alpineLabel, cveLabel];
+              const key = `php-${group.php}|alpine-${group.alpine_minor}|${group.cve}`;
+              currentKeys.add(key);
+
+              const alpineFull = uniq(group.alpine_full_versions);
+              const fixedVersions = uniq(group.fixed_versions);
+              const variants = uniq(group.variants);
+              const packages = uniq(group.packages);
+              const matchedHotfixScripts = uniq(group.matched_hotfix_scripts);
+              const references = uniq(group.primary_urls);
+
+              const imagesBlock = group.images.length
+                ? group.images
+                    .map(img => {
+                      const digestPart = img.digest ? `@${img.digest}` : "";
+                      return `- \`${img.image_sha}${digestPart}\` (${img.variant})`;
+                    })
+                    .join("\n")
+                : "- none";
+
+              const referencesBlock = references.length
+                ? references.map(url => `- ${url}`).join("\n")
+                : "- none";
+
+              const body = [
+                `Automated Trivy scan detected an unresolved vulnerability.`,
+                ``,
+                `## Summary`,
+                `- CVE: \`${group.cve}\``,
+                `- Severity: \`${group.severity}\``,
+                `- PHP branch: \`${group.php}\``,
+                `- Alpine branch: \`${group.alpine_minor}\``,
+                `- Alpine version detected in affected images: \`${alpineFull.length ? alpineFull.join(", ") : "unknown"}\``,
+                `- Fixed package version: \`${fixedVersions.length ? fixedVersions.join(", ") : "unknown"}\``,
+                ``,
+                `## Affected variants`,
+                toBulletList(variants),
+                ``,
+                `## Affected packages`,
+                toBulletList(packages),
+                ``,
+                `## Affected images`,
+                imagesBlock,
+                ``,
+                `## Remediation status`,
+                `- Matched hotfix scripts: \`${matchedHotfixScripts.length}\``,
+                `- CVE present after rebuild: \`yes\``,
+                `- Affected variants after rebuild:`,
+                toBulletList(variants),
+                ``,
+                `## Workflow context`,
+                `- Workflow: ${context.workflow}`,
+                `- Run ID: ${context.runId}`,
+                `- Commit: \`${context.sha}\``,
+                ``,
+                `## References`,
+                referencesBlock,
+                ``,
+                `<!-- managed-by: trivy-cve-sync -->`,
+                `<!-- cve-key:${key} -->`,
+                `<!-- variants:${variants.join(",")} -->`,
+                `<!-- packages:${packages.join(",")} -->`,
+                `<!-- matched-hotfix-scripts:${matchedHotfixScripts.length} -->`,
+              ].join("\n");
+
+              const existing = managedOpenIssues.find(issue => parseMarkerValue(issue.body, "cve-key") === key);
+
+              if (!existing) {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body,
+                  labels,
+                });
+                continue;
+              }
+
+              const previousVariants = parseMarkerList(existing.body, "variants");
+              const variantDiff = diff(previousVariants, variants);
+
+              if (variantDiff.added.length || variantDiff.removed.length) {
+                const commentLines = [
+                  `Update after latest automated Trivy scan.`,
+                  ``,
+                  `The scope of this vulnerability changed.`,
+                  ``,
+                ];
+
+                if (variantDiff.added.length) {
+                  commentLines.push(`Added variants:`);
+                  commentLines.push(toBulletList(variantDiff.added));
+                  commentLines.push(``);
+                }
+
+                if (variantDiff.removed.length) {
+                  commentLines.push(`Removed variants:`);
+                  commentLines.push(toBulletList(variantDiff.removed));
+                  commentLines.push(``);
+                }
+
+                commentLines.push(`Currently affected:`);
+                commentLines.push(toBulletList(variants));
+                commentLines.push(``);
+                commentLines.push(`Workflow run: ${context.runId}`);
+                commentLines.push(`Commit: \`${context.sha}\``);
+
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body: commentLines.join("\n"),
+                });
+              }
+
+              const existingLabels = (existing.labels || []).map(label =>
+                typeof label === "string" ? label : label.name
+              );
+              const labelsChanged =
+                labels.length !== existingLabels.length ||
+                labels.some(label => !existingLabels.includes(label));
+
+              if (existing.title !== title || existing.body !== body || labelsChanged) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  title,
+                  body,
+                  labels,
+                });
+              }
+            }
+
+            if (!fullBuild) {
+              return;
+            }
+
+            for (const issue of managedOpenIssues) {
+              const key = parseMarkerValue(issue.body, "cve-key");
+              if (!key || currentKeys.has(key)) {
+                continue;
+              }
+
+              const php = parseMarkerValue(issue.body, "cve-key").split("|")[0]?.replace(/^php-/, "") || "";
+              const alpine = parseMarkerValue(issue.body, "cve-key").split("|")[1]?.replace(/^alpine-/, "") || "";
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body: `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images based on Alpine ${alpine}. Closing issue.`,
+              });
+
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: issue.number,
+                state: "closed",
+              });
+            }
+
   update-repo:
     name: update releases and generated repository content
-    needs: [discover, build]
+    needs: [discover, build, sync-security-issues]
     if: github.ref == 'refs/heads/main' && always()
     runs-on: ubuntu-latest
     permissions:
@@ -991,6 +1323,11 @@ jobs:
 
           if [ "${{ needs.discover.outputs.count }}" != "0" ] && [ "${{ needs.build.result }}" != "success" ]; then
             echo "Build job did not complete successfully." >&2
+            exit 1
+          fi
+
+          if [ "${{ needs.discover.outputs.count }}" != "0" ] && [ "${{ needs.sync-security-issues.result }}" != "success" ]; then
+            echo "Security issue sync job did not complete successfully." >&2
             exit 1
           fi
 
@@ -1565,4 +1902,3 @@ jobs:
         run: |
           set -euo pipefail
           rsync -az --delete -e "ssh -p ${RSYNC_PORT}" _site_web/ "${RSYNC_USER}@${RSYNC_HOST}:${RSYNC_PATH}/"
-          
