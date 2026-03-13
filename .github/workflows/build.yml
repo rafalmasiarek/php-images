@@ -1560,19 +1560,21 @@ jobs:
 
           shields_endpoint() {
             local url="$1"
+            local v="${GITHUB_RUN_ID:-$(date -u +%s)}"
             url="${url//:/%3A}"
             url="${url//\//%2F}"
             url="${url//\?/%3F}"
             url="${url//&/%26}"
-            echo "https://img.shields.io/endpoint?url=${url}"
+            echo "https://img.shields.io/endpoint?url=${url}&v=${v}"
           }
 
           shields_static() {
-            local label message color
+            local label message color v
             label="$(urlencode "$1")"
             message="$(urlencode "$2")"
             color="$(urlencode "$3")"
-            echo "https://img.shields.io/static/v1?label=${label}&message=${message}&color=${color}"
+            v="${GITHUB_RUN_ID:-$(date -u +%s)}"
+            echo "https://img.shields.io/static/v1?label=${label}&message=${message}&color=${color}&v=${v}"
           }
 
           alpine_badge_md() {
