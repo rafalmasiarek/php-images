@@ -763,8 +763,6 @@ jobs:
 
           META="out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt"
           SUM="out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt"
-          HOTFIX_META="out/hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}.json"
-          VULNS="out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json"
 
           cat > "$META" <<EOF
           php=${{ matrix.php }}
@@ -839,13 +837,25 @@ jobs:
               encoding="utf-8",
           )
 
+          def is_php_specific_package(pkg: str) -> bool:
+              pkg = (pkg or "").strip().lower()
+              if not pkg:
+                  return False
+              if pkg == "php":
+                  return True
+              if pkg.startswith("php"):
+                  return True
+              return False
+
           trivy = json.loads(Path("trivy-results.json").read_text(encoding="utf-8"))
           records = []
 
           for result in trivy.get("Results") or []:
               for vuln in result.get("Vulnerabilities") or []:
+                  package = vuln.get("PkgName") or ""
                   records.append(
                       {
+                          "scope": "php" if is_php_specific_package(package) else "os",
                           "php": php,
                           "variant": variant,
                           "alpine_minor": alpine_minor,
@@ -854,7 +864,7 @@ jobs:
                           "image_date": image_date,
                           "image_moving": image_moving,
                           "digest": digest,
-                          "package": vuln.get("PkgName") or "",
+                          "package": package,
                           "installed_version": vuln.get("InstalledVersion") or "",
                           "fixed_version": vuln.get("FixedVersion") or "",
                           "severity": vuln.get("Severity") or "UNKNOWN",
@@ -945,7 +955,6 @@ jobs:
 
           python3 - <<'PY'
           import json
-          from collections import defaultdict
           from pathlib import Path
           import os
 
@@ -967,21 +976,28 @@ jobs:
           for path in sorted(Path("artifacts/vulns").glob("*.json")):
               items = json.loads(path.read_text(encoding="utf-8"))
               for item in items:
+                  scope = item.get("scope") or "os"
                   cve = item.get("cve") or ""
                   php = item.get("php") or ""
                   alpine_minor = item.get("alpine_minor") or "unknown"
-                  if not cve or not php:
+                  if not cve:
                       continue
 
-                  key = f"{php}|{alpine_minor}|{cve}"
+                  if scope == "php":
+                      key = f"php|{php}|{alpine_minor}|{cve}"
+                  else:
+                      key = f"os|{alpine_minor}|{cve}"
+
                   group = groups.setdefault(
                       key,
                       {
-                          "php": php,
+                          "scope": scope,
+                          "php": php if scope == "php" else "",
                           "alpine_minor": alpine_minor,
                           "cve": cve,
                           "severity": "UNKNOWN",
                           "alpine_full_versions": set(),
+                          "php_branches": set(),
                           "variants": set(),
                           "packages": set(),
                           "fixed_versions": set(),
@@ -997,6 +1013,8 @@ jobs:
 
                   if item.get("alpine_full"):
                       group["alpine_full_versions"].add(item["alpine_full"])
+                  if php:
+                      group["php_branches"].add(php)
                   if item.get("variant"):
                       group["variants"].add(item["variant"])
                   if item.get("package"):
@@ -1008,6 +1026,7 @@ jobs:
 
                   group["images"].append(
                       {
+                          "php": php,
                           "variant": item.get("variant") or "unknown",
                           "image_sha": item.get("image_sha") or "",
                           "digest": item.get("digest") or "",
@@ -1025,8 +1044,8 @@ jobs:
           for group in groups.values():
               images = []
               seen_images = set()
-              for image in sorted(group["images"], key=lambda x: (x["variant"], x["image_sha"], x["digest"])):
-                  key = (image["variant"], image["image_sha"], image["digest"])
+              for image in sorted(group["images"], key=lambda x: (x["php"], x["variant"], x["image_sha"], x["digest"])):
+                  key = (image["php"], image["variant"], image["image_sha"], image["digest"])
                   if key in seen_images:
                       continue
                   seen_images.add(key)
@@ -1034,11 +1053,13 @@ jobs:
 
               normalized.append(
                   {
+                      "scope": group["scope"],
                       "php": group["php"],
                       "alpine_minor": group["alpine_minor"],
                       "cve": group["cve"],
                       "severity": group["severity"],
                       "alpine_full_versions": sorted(group["alpine_full_versions"]),
+                      "php_branches": sorted(group["php_branches"]),
                       "variants": sorted(group["variants"]),
                       "packages": sorted(group["packages"]),
                       "fixed_versions": sorted(group["fixed_versions"]),
@@ -1050,7 +1071,18 @@ jobs:
               )
 
           Path("aggregated-vulns.json").write_text(
-              json.dumps(sorted(normalized, key=lambda x: (x["php"], x["alpine_minor"], x["cve"])), indent=2) + "\n",
+              json.dumps(
+                  sorted(
+                      normalized,
+                      key=lambda x: (
+                          x["scope"],
+                          x.get("php") or "",
+                          x["alpine_minor"],
+                          x["cve"],
+                      ),
+                  ),
+                  indent=2,
+              ) + "\n",
               encoding="utf-8",
           )
           PY
@@ -1107,7 +1139,7 @@ jobs:
 
             const toBulletList = values =>
               values.length ? values.map(v => `- \`${v}\``).join("\n") : "- none";
-            
+
             const toIndentedBulletList = values =>
               values.length ? values.map(v => `  - \`${v}\``).join("\n") : "  - none";
 
@@ -1135,31 +1167,43 @@ jobs:
             const currentKeys = new Set();
 
             for (const group of groups) {
-              const phpLabel = `php-${group.php}`;
               const alpineLabel = `alpine-${group.alpine_minor}`;
               const cveLabel = `cve:${group.cve}`;
+              const phpBranches = uniq(group.php_branches || []);
+              const variants = uniq(group.variants || []);
+              const packages = uniq(group.packages || []);
+              const matchedHotfixScripts = uniq(group.matched_hotfix_scripts || []);
+              const references = uniq(group.primary_urls || []);
+              const alpineFull = uniq(group.alpine_full_versions || []);
+              const fixedVersions = uniq(group.fixed_versions || []);
 
-              await ensureLabel(phpLabel, "0e8a16", `PHP branch ${group.php}`);
               await ensureLabel(alpineLabel, "1d76db", `Alpine ${group.alpine_minor}`);
               await ensureLabel(cveLabel, "d93f0b", `CVE ${group.cve}`);
 
-              const title = `Security: ${group.cve} affects PHP ${group.php} images based on Alpine ${group.alpine_minor}`;
-              const labels = ["security", "trivy", phpLabel, alpineLabel, cveLabel];
-              const key = `php-${group.php}|alpine-${group.alpine_minor}|${group.cve}`;
-              currentKeys.add(key);
+              let title;
+              let labels;
+              let key;
 
-              const alpineFull = uniq(group.alpine_full_versions);
-              const fixedVersions = uniq(group.fixed_versions);
-              const variants = uniq(group.variants);
-              const packages = uniq(group.packages);
-              const matchedHotfixScripts = uniq(group.matched_hotfix_scripts);
-              const references = uniq(group.primary_urls);
+              if (group.scope === "php") {
+                const phpLabel = `php-${group.php}`;
+                await ensureLabel(phpLabel, "0e8a16", `PHP branch ${group.php}`);
+                title = `Security: ${group.cve} affects PHP ${group.php} images`;
+                labels = ["security", "trivy", phpLabel, alpineLabel, cveLabel];
+                key = `php|php-${group.php}|alpine-${group.alpine_minor}|${group.cve}`;
+              } else {
+                title = `Security: ${group.cve} affects images based on Alpine ${group.alpine_minor}`;
+                labels = ["security", "trivy", alpineLabel, cveLabel];
+                key = `os|alpine-${group.alpine_minor}|${group.cve}`;
+              }
+
+              currentKeys.add(key);
 
               const imagesBlock = group.images.length
                 ? group.images
                     .map(img => {
                       const digestPart = img.digest ? `@${img.digest}` : "";
-                      return `- \`${img.image_sha}${digestPart}\` (${img.variant})`;
+                      const phpPart = img.php ? `${img.php} / ` : "";
+                      return `- \`${img.image_sha}${digestPart}\` (${phpPart}${img.variant})`;
                     })
                     .join("\n")
                 : "- none";
@@ -1174,11 +1218,18 @@ jobs:
                 `## Summary`,
                 `- CVE: \`${group.cve}\``,
                 `- Severity: \`${group.severity}\``,
-                `- PHP branch: \`${group.php}\``,
+                ...(group.scope === "php" ? [`- PHP branch: \`${group.php}\``] : []),
                 `- Alpine branch: \`${group.alpine_minor}\``,
                 `- Alpine version detected in affected images: \`${alpineFull.length ? alpineFull.join(", ") : "unknown"}\``,
                 `- Fixed package version: \`${fixedVersions.length ? fixedVersions.join(", ") : "unknown"}\``,
                 ``,
+                ...(group.scope === "os"
+                  ? [
+                      `## Affected PHP branches`,
+                      toBulletList(phpBranches),
+                      ``,
+                    ]
+                  : []),
                 `## Affected variants`,
                 toBulletList(variants),
                 ``,
@@ -1191,6 +1242,12 @@ jobs:
                 `## Remediation status`,
                 `- Matched hotfix scripts: \`${matchedHotfixScripts.length}\``,
                 `- CVE present after rebuild: \`yes\``,
+                ...(group.scope === "os"
+                  ? [
+                      `- Affected PHP branches after rebuild:`,
+                      toIndentedBulletList(phpBranches),
+                    ]
+                  : []),
                 `- Affected variants after rebuild:`,
                 toIndentedBulletList(variants),
                 ``,
@@ -1203,7 +1260,9 @@ jobs:
                 referencesBlock,
                 ``,
                 `<!-- managed-by: trivy-cve-sync -->`,
+                `<!-- scope:${group.scope} -->`,
                 `<!-- cve-key:${key} -->`,
+                `<!-- php-branches:${phpBranches.join(",")} -->`,
                 `<!-- variants:${variants.join(",")} -->`,
                 `<!-- packages:${packages.join(",")} -->`,
                 `<!-- matched-hotfix-scripts:${matchedHotfixScripts.length} -->`,
@@ -1223,15 +1282,33 @@ jobs:
               }
 
               const previousVariants = parseMarkerList(existing.body, "variants");
+              const previousPhpBranches = parseMarkerList(existing.body, "php-branches");
               const variantDiff = diff(previousVariants, variants);
+              const phpBranchDiff = diff(previousPhpBranches, phpBranches);
 
-              if (variantDiff.added.length || variantDiff.removed.length) {
+              if (
+                variantDiff.added.length ||
+                variantDiff.removed.length ||
+                (group.scope === "os" && (phpBranchDiff.added.length || phpBranchDiff.removed.length))
+              ) {
                 const commentLines = [
                   `Update after latest automated Trivy scan.`,
                   ``,
                   `The scope of this vulnerability changed.`,
                   ``,
                 ];
+
+                if (group.scope === "os" && phpBranchDiff.added.length) {
+                  commentLines.push(`Added PHP branches:`);
+                  commentLines.push(toBulletList(phpBranchDiff.added));
+                  commentLines.push(``);
+                }
+
+                if (group.scope === "os" && phpBranchDiff.removed.length) {
+                  commentLines.push(`Removed PHP branches:`);
+                  commentLines.push(toBulletList(phpBranchDiff.removed));
+                  commentLines.push(``);
+                }
 
                 if (variantDiff.added.length) {
                   commentLines.push(`Added variants:`);
@@ -1242,6 +1319,12 @@ jobs:
                 if (variantDiff.removed.length) {
                   commentLines.push(`Removed variants:`);
                   commentLines.push(toBulletList(variantDiff.removed));
+                  commentLines.push(``);
+                }
+
+                if (group.scope === "os") {
+                  commentLines.push(`Currently affected PHP branches:`);
+                  commentLines.push(toBulletList(phpBranches));
                   commentLines.push(``);
                 }
 
@@ -1288,14 +1371,24 @@ jobs:
                 continue;
               }
 
-              const php = parseMarkerValue(issue.body, "cve-key").split("|")[0]?.replace(/^php-/, "") || "";
-              const alpine = parseMarkerValue(issue.body, "cve-key").split("|")[1]?.replace(/^alpine-/, "") || "";
+              const scope = parseMarkerValue(issue.body, "scope");
+              const parts = key.split("|");
+
+              let closeMessage = "Latest automated Trivy scan no longer detects this CVE. Closing issue.";
+
+              if (scope === "php" && parts.length >= 4) {
+                const php = parts[1].replace(/^php-/, "");
+                closeMessage = `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images. Closing issue.`;
+              } else if (scope === "os" && parts.length >= 3) {
+                const alpine = parts[1].replace(/^alpine-/, "");
+                closeMessage = `Latest automated Trivy scan no longer detects this CVE for images based on Alpine ${alpine}. Closing issue.`;
+              }
 
               await github.rest.issues.createComment({
                 owner,
                 repo,
                 issue_number: issue.number,
-                body: `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images based on Alpine ${alpine}. Closing issue.`,
+                body: closeMessage,
               });
 
               await github.rest.issues.update({
