@@ -47,7 +47,7 @@ jobs:
             head="${{ github.sha }}"
           fi
 
-          changed="$(git diff --name-only "$base" "$head" | grep -E '^versions/[0-9]+\.[0-9]+/(cli|fpm)/Dockerfile$' || true)"
+          changed="$(git diff --name-only "$base" "$head" | grep -E '^versions/[0-9]+\.[0-9]+/[^/]+/Dockerfile$' || true)"
 
           if [ -z "${changed//[[:space:]]/}" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
@@ -66,7 +66,7 @@ jobs:
 
           include = []
           for path in changed:
-            m = re.match(r"^versions/(\d+\.\d+)/(cli|fpm)/Dockerfile$", path)
+            m = re.match(r"^versions/(\d+\.\d+)/([^/]+)/Dockerfile$", path)
             if not m:
               continue
 
@@ -592,7 +592,7 @@ jobs:
       - name: No version Dockerfiles changed
         shell: bash
         run: |
-          echo "No changes detected in versions/*/(cli|fpm)/Dockerfile. Skipping build."
+          echo "No changes detected in versions/*/*/Dockerfile. Skipping build."
 
   ci:
     name: build-php-versions (required)
