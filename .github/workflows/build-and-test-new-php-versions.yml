@@ -5,13 +5,13 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "versions/**"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/build-and-test-new-php-versions.yml"
   push:
     branches:
       - "bot/add-php-*"
     paths:
       - "versions/**"
-      - ".github/workflows/build.yml"
+      - ".github/workflows/build-and-test-new-php-versions.yml"
 
 permissions:
   contents: read
@@ -99,6 +99,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Prepare lifecycle metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .lifecycle.env <<EOF
+          PHP_BRANCH=${{ matrix.mm }}
+          PHP_VERSION=${{ matrix.mm }}
+          PHP_EOL=
+          IMAGE_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+
+      - name: Prepare selected hotfix directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .hotfixes-selected
+          mkdir -p .hotfixes-selected
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -115,10 +133,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
-      - name: Build (linux/amd64) - load for report generation
+      - name: Build local candidate image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -129,22 +145,342 @@ jobs:
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: ${{ matrix.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
-      - name: Generate PHP report
+      - name: Trivy scan candidate (JSON)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ matrix.tag }}
+          format: json
+          output: trivy-results-pre.json
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Detect Alpine versions
+        id: alpine
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DOCKERFILE_ALPINE_FULL="$(
+            awk '
+              BEGIN { IGNORECASE=1 }
+              /^FROM[[:space:]]+/ {
+                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+              }
+            ' "${{ matrix.dockerfile }}" || true
+          )"
+          DOCKERFILE_ALPINE_FULL="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | tr -d '\r\n')"
+
+          DOCKERFILE_ALPINE_MINOR=""
+          if [ -n "$DOCKERFILE_ALPINE_FULL" ]; then
+            DOCKERFILE_ALPINE_MINOR="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
+
+          IMAGE_ALPINE_FULL="$(
+            docker run --rm --entrypoint /bin/sh "${{ matrix.tag }}" -lc 'cat /etc/alpine-release' || true
+          )"
+          IMAGE_ALPINE_FULL="$(printf '%s' "$IMAGE_ALPINE_FULL" | tr -d '\r\n')"
+
+          IMAGE_ALPINE_MINOR=""
+          if [ -n "$IMAGE_ALPINE_FULL" ]; then
+            IMAGE_ALPINE_MINOR="$(printf '%s' "$IMAGE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
+
+          {
+            printf 'dockerfile_full=%s\n' "$DOCKERFILE_ALPINE_FULL"
+            printf 'dockerfile_minor=%s\n' "$DOCKERFILE_ALPINE_MINOR"
+            printf 'image_full=%s\n' "$IMAGE_ALPINE_FULL"
+            printf 'image_minor=%s\n' "$IMAGE_ALPINE_MINOR"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select matching hotfixes
+        id: hotfixes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf .hotfixes-selected
+          mkdir -p .hotfixes-selected
+
+          mapfile -t CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
+          )
+
+          declare -a SEARCH_DIRS=()
+          add_dir() {
+            local dir="$1"
+            [ -z "$dir" ] && return 0
+            for existing in "${SEARCH_DIRS[@]:-}"; do
+              [ "$existing" = "$dir" ] && return 0
+            done
+            SEARCH_DIRS+=("$dir")
+          }
+
+          add_dir "hotfixes/all"
+          add_dir "hotfixes/alpine/all"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.dockerfile_minor }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.dockerfile_full }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.image_minor }}"
+          add_dir "hotfixes/alpine/${{ steps.alpine.outputs.image_full }}"
+          add_dir "hotfixes/php/${{ matrix.mm }}/all"
+          add_dir "hotfixes/php/${{ matrix.mm }}/${{ matrix.variant }}"
+
+          declare -a MATCHED_CVES=()
+          declare -a UNMATCHED_CVES=()
+          declare -a SELECTED_FILES=()
+
+          found=0
+          idx=0
+
+          for cve in "${CVES[@]}"; do
+            matched_this_cve=0
+
+            for dir in "${SEARCH_DIRS[@]}"; do
+              [ -d "$dir" ] || continue
+              shopt -s nullglob
+              for f in "$dir/${cve}"-*.sh; do
+                idx=$((idx + 1))
+                dest=".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
+                cp "$f" "$dest"
+                SELECTED_FILES+=("$f")
+                matched_this_cve=1
+                found=1
+              done
+              shopt -u nullglob
+            done
+
+            if [ "$matched_this_cve" -eq 1 ]; then
+              MATCHED_CVES+=("$cve")
+            else
+              UNMATCHED_CVES+=("$cve")
+            fi
+          done
+
+          joined() {
+            local IFS=','
+            echo "$*"
+          }
+
+          if [ "$found" -eq 1 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "matched_cves=$(joined "${MATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "unmatched_cves=$(joined "${UNMATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "selected_count=${#SELECTED_FILES[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild local image with selected hotfixes
+        if: steps.hotfixes.outputs.enabled == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: false
+          load: true
+          platforms: linux/amd64
+          build-args: |
+            PECL_FILE=${{ matrix.context }}/pecl.txt
+          tags: ${{ matrix.tag }}
+
+      - name: Trivy scan final image (JSON)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ matrix.tag }}
+          format: json
+          output: trivy-results-post.json
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
+
+      - name: Analyze remediation result
+        id: remediation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t PRE_CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
+          )
+
+          mapfile -t POST_CVES < <(
+            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-post.json | sort -u
+          )
+
+          declare -A PRE_SET=()
+          declare -A POST_SET=()
+
+          for cve in "${PRE_CVES[@]}"; do
+            PRE_SET["$cve"]=1
+          done
+          for cve in "${POST_CVES[@]}"; do
+            POST_SET["$cve"]=1
+          done
+
+          declare -a FIXED_CVES=()
+          declare -a REMAINING_CVES=()
+          declare -a NEW_CVES=()
+
+          for cve in "${PRE_CVES[@]}"; do
+            if [ -n "${POST_SET[$cve]:-}" ]; then
+              REMAINING_CVES+=("$cve")
+            else
+              FIXED_CVES+=("$cve")
+            fi
+          done
+
+          for cve in "${POST_CVES[@]}"; do
+            if [ -z "${PRE_SET[$cve]:-}" ]; then
+              NEW_CVES+=("$cve")
+            fi
+          done
+
+          joined() {
+            local IFS=','
+            echo "$*"
+          }
+
+          echo "fixed_cves=$(joined "${FIXED_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "remaining_cves=$(joined "${REMAINING_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "new_cves=$(joined "${NEW_CVES[@]}")" >> "$GITHUB_OUTPUT"
+          echo "fixed_count=${#FIXED_CVES[@]}" >> "$GITHUB_OUTPUT"
+          echo "remaining_count=${#REMAINING_CVES[@]}" >> "$GITHUB_OUTPUT"
+          echo "new_count=${#NEW_CVES[@]}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PHP and security report
         id: report
         shell: bash
+        env:
+          HOTFIX_ENABLED: ${{ steps.hotfixes.outputs.enabled }}
+          HOTFIX_MATCHED_CVES: ${{ steps.hotfixes.outputs.matched_cves }}
+          HOTFIX_UNMATCHED_CVES: ${{ steps.hotfixes.outputs.unmatched_cves }}
+          HOTFIX_SELECTED_COUNT: ${{ steps.hotfixes.outputs.selected_count }}
+          REM_FIXED_COUNT: ${{ steps.remediation.outputs.fixed_count }}
+          REM_REMAINING_COUNT: ${{ steps.remediation.outputs.remaining_count }}
+          REM_NEW_COUNT: ${{ steps.remediation.outputs.new_count }}
         run: |
           set -euo pipefail
           img="${{ matrix.tag }}"
           out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
+
+          python3 - <<'PY' > /tmp/security-report.md
+          import json
+          import os
+
+          def load(path):
+              with open(path, "r", encoding="utf-8") as fh:
+                  return json.load(fh)
+
+          def counts(obj):
+              result = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
+              for res in obj.get("Results", []) or []:
+                  for vuln in res.get("Vulnerabilities", []) or []:
+                      sev = str(vuln.get("Severity") or "").upper()
+                      if sev in result:
+                          result[sev] += 1
+              return result
+
+          severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+
+          def remaining_rows(obj):
+              rows = []
+              seen = set()
+              for res in obj.get("Results", []) or []:
+                  for vuln in res.get("Vulnerabilities", []) or []:
+                      sev = str(vuln.get("Severity") or "UNKNOWN").upper()
+                      if sev not in ("CRITICAL", "HIGH", "MEDIUM"):
+                          continue
+                      vid = str(vuln.get("VulnerabilityID") or "")
+                      pkg = str(vuln.get("PkgName") or "")
+                      installed = str(vuln.get("InstalledVersion") or "")
+                      fixed = str(vuln.get("FixedVersion") or "")
+                      key = (vid, pkg, installed, fixed, sev)
+                      if key in seen:
+                          continue
+                      seen.add(key)
+                      rows.append({
+                          "id": vid,
+                          "pkg": pkg,
+                          "severity": sev,
+                          "installed": installed,
+                          "fixed": fixed,
+                      })
+              rows.sort(key=lambda r: (severity_rank.get(r["severity"], 9), r["pkg"], r["id"]))
+              return rows
+
+          pre = load("trivy-results-pre.json")
+          post = load("trivy-results-post.json")
+
+          pre_counts = counts(pre)
+          post_counts = counts(post)
+          rows = remaining_rows(post)[:15]
+
+          hotfix_enabled = os.environ.get("HOTFIX_ENABLED", "")
+          matched = [x for x in os.environ.get("HOTFIX_MATCHED_CVES", "").split(",") if x]
+          unmatched = [x for x in os.environ.get("HOTFIX_UNMATCHED_CVES", "").split(",") if x]
+          selected_count = os.environ.get("HOTFIX_SELECTED_COUNT", "0")
+          fixed_count = os.environ.get("REM_FIXED_COUNT", "0")
+          remaining_count = os.environ.get("REM_REMAINING_COUNT", "0")
+          new_count = os.environ.get("REM_NEW_COUNT", "0")
+
+          print("### Security summary")
+          print()
+          print("| Stage | Critical | High | Medium |")
+          print("|---|---:|---:|---:|")
+          print(f"| Before hotfixes | {pre_counts['CRITICAL']} | {pre_counts['HIGH']} | {pre_counts['MEDIUM']} |")
+          print(f"| After hotfixes | {post_counts['CRITICAL']} | {post_counts['HIGH']} | {post_counts['MEDIUM']} |")
+          print()
+          print("### Hotfix matching")
+          print()
+          print(f"- Hotfix scripts selected: `{selected_count}`")
+          print(f"- Matching hotfix CVEs found: `{'yes' if matched else 'no'}`")
+          print(f"- Hotfix rebuild performed: `{'yes' if hotfix_enabled == 'true' else 'no'}`")
+          print(f"- Fixed CVEs after rebuild: `{fixed_count}`")
+          print(f"- Remaining CVEs after rebuild: `{remaining_count}`")
+          print(f"- New CVEs after rebuild: `{new_count}`")
+          print()
+
+          if matched:
+              shown = ", ".join(f"`{x}`" for x in matched[:20])
+              print(f"- Matched CVEs: {shown}")
+          else:
+              print("- Matched CVEs: none")
+
+          if unmatched:
+              shown = ", ".join(f"`{x}`" for x in unmatched[:20])
+              print(f"- Unmatched CVEs: {shown}")
+          else:
+              print("- Unmatched CVEs: none")
+
+          print()
+          print("### Top remaining CVEs")
+          print()
+
+          if rows:
+              print("| CVE | Severity | Package | Installed | Fixed version |")
+              print("|---|---|---|---|---|")
+              for row in rows:
+                  fixed = row["fixed"] if row["fixed"] else "-"
+                  installed = row["installed"] if row["installed"] else "-"
+                  pkg = row["pkg"] if row["pkg"] else "-"
+                  vid = row["id"] if row["id"] else "-"
+                  print(f"| `{vid}` | `{row['severity']}` | `{pkg}` | `{installed}` | `{fixed}` |")
+          else:
+              print("No CRITICAL/HIGH/MEDIUM CVEs detected after rebuild.")
+          PY
 
           {
             echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
             echo "## PHP report: \`${{ matrix.mm }}\` / \`${{ matrix.variant }}\`"
             echo
             echo "**Image (local):** \`$img\`"
+            echo
+            cat /tmp/security-report.md
             echo
             echo "### php -v"
             echo '```'
@@ -196,6 +532,18 @@ jobs:
         with:
           name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
           path: ${{ steps.report.outputs.path }}
+
+      - name: Upload Trivy pre-scan artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-pre-${{ matrix.mm }}-${{ matrix.variant }}
+          path: trivy-results-pre.json
+
+      - name: Upload Trivy post-scan artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-post-${{ matrix.mm }}-${{ matrix.variant }}
+          path: trivy-results-post.json
 
       - name: Comment report on PR
         if: github.event_name == 'pull_request'
