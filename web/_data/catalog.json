@@ -18,8 +18,8 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.2",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-13",
+      "last_sha": "d548aef",
       "variants": [
         {
           "name": "cli",
@@ -31,7 +31,7 @@
           "report_relative_url": "/reports/trivy-8.2-cli.html",
           "report_file": "trivy-8.2-cli.html",
           "critical": 0,
-          "high": 0,
+          "high": 4,
           "medium": 0
         },
         {
@@ -44,7 +44,7 @@
           "report_relative_url": "/reports/trivy-8.2-fpm.html",
           "report_file": "trivy-8.2-fpm.html",
           "critical": 0,
-          "high": 0,
+          "high": 4,
           "medium": 0
         }
       ]
@@ -57,8 +57,8 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.3",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-13",
+      "last_sha": "d548aef",
       "variants": [
         {
           "name": "cli",
@@ -70,7 +70,7 @@
           "report_relative_url": "/reports/trivy-8.3-cli.html",
           "report_file": "trivy-8.3-cli.html",
           "critical": 0,
-          "high": 0,
+          "high": 4,
           "medium": 0
         },
         {
@@ -83,21 +83,21 @@
           "report_relative_url": "/reports/trivy-8.3-fpm.html",
           "report_file": "trivy-8.3-fpm.html",
           "critical": 0,
-          "high": 0,
+          "high": 4,
           "medium": 0
         }
       ]
     },
     {
       "php": "8.4",
-      "version": "8.4.18",
+      "version": "8.4.19",
       "eol": "2028-12-31",
       "eoas": "2026-12-31",
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.4",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-13",
+      "last_sha": "d548aef",
       "variants": [
         {
           "name": "cli",
@@ -129,14 +129,14 @@
     },
     {
       "php": "8.5",
-      "version": "8.5.3",
+      "version": "8.5.4",
       "eol": "2029-12-31",
       "eoas": "2027-12-31",
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.5",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-13",
+      "last_sha": "d548aef",
       "variants": [
         {
           "name": "cli",
@@ -173,10 +173,10 @@
       "version": "8.2.30",
       "eol": "2026-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
-      "high": 0,
+      "high": 4,
       "medium": 0,
       "report_relative_url": "/reports/trivy-8.2-cli.html"
     },
@@ -185,10 +185,10 @@
       "version": "8.2.30",
       "eol": "2026-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
-      "high": 0,
+      "high": 4,
       "medium": 0,
       "report_relative_url": "/reports/trivy-8.2-fpm.html"
     },
@@ -197,10 +197,10 @@
       "version": "8.3.30",
       "eol": "2027-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
-      "high": 0,
+      "high": 4,
       "medium": 0,
       "report_relative_url": "/reports/trivy-8.3-cli.html"
     },
@@ -209,20 +209,20 @@
       "version": "8.3.30",
       "eol": "2027-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
-      "high": 0,
+      "high": 4,
       "medium": 0,
       "report_relative_url": "/reports/trivy-8.3-fpm.html"
     },
     {
       "php": "8.4",
-      "version": "8.4.18",
+      "version": "8.4.19",
       "eol": "2028-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -230,11 +230,11 @@
     },
     {
       "php": "8.4",
-      "version": "8.4.18",
+      "version": "8.4.19",
       "eol": "2028-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -242,11 +242,11 @@
     },
     {
       "php": "8.5",
-      "version": "8.5.3",
+      "version": "8.5.4",
       "eol": "2029-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -254,11 +254,11 @@
     },
     {
       "php": "8.5",
-      "version": "8.5.3",
+      "version": "8.5.4",
       "eol": "2029-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-12",
-      "last_sha": "b134f4f",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-13",
+      "last_sha": "d548aef",
       "critical": 0,
       "high": 0,
       "medium": 0,
