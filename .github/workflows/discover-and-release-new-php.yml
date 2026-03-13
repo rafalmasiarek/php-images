@@ -2,7 +2,7 @@ name: discover-and-release-new-php
 
 on:
   schedule:
-    - cron: "23 4 * * *" # daily (UTC)
+    - cron: "23 4 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -38,8 +38,6 @@ jobs:
           ROOT = Path(".")
           VERSIONS_DIR = ROOT / "versions"
 
-          REQUIRED_VARIANTS = ["cli", "fpm"]
-
           try:
             LIMIT = int(os.environ.get("LIMIT", "1") or "1")
           except Exception:
@@ -60,7 +58,17 @@ jobs:
               return (0,)
             return tuple(int(x) for x in m.group(1).split("."))
 
-          # 1) Determine current highest existing X.Y in repo
+          def variants_for_php(mm: str) -> list[str]:
+            php_dir = VERSIONS_DIR / mm
+            if not php_dir.exists():
+              return []
+
+            variants = []
+            for p in sorted(php_dir.iterdir()):
+              if p.is_dir() and (p / "Dockerfile").exists():
+                variants.append(p.name)
+            return variants
+
           existing_mm: list[str] = []
           if VERSIONS_DIR.exists():
             for p in VERSIONS_DIR.iterdir():
@@ -75,18 +83,20 @@ jobs:
           base_mm = existing_mm[-1]
           base_dir = VERSIONS_DIR / base_mm
 
-          # Sanity: base has Dockerfiles for all required variants
+          REQUIRED_VARIANTS = variants_for_php(base_mm)
+          if not REQUIRED_VARIANTS:
+            print(f"No variants with Dockerfile found in versions/{base_mm}")
+            sys.exit(1)
+
           missing = [v for v in REQUIRED_VARIANTS if not (base_dir / v / "Dockerfile").exists()]
           if missing:
             print(f"Base {base_mm} missing Dockerfile(s) for variants: {', '.join(missing)}")
             sys.exit(1)
 
-          # 2) Docker Hub auth token for registry API
           token = http_get_json(
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/php:pull"
           )["token"]
 
-          # 3) Fetch all tags (paginated)
           def fetch_all_tags() -> list[str]:
             tags: list[str] = []
             last: str | None = None
@@ -119,13 +129,11 @@ jobs:
             print("No tags returned from registry, abort.")
             sys.exit(1)
 
-          # 4) Accept only stable tags: X.Y.Z-{cli,fpm}-alpine*
           variant_alt = "|".join(re.escape(v) for v in REQUIRED_VARIANTS)
           tag_re = re.compile(
             rf"^(?P<mm>\d+\.\d+)\.(?P<patch>\d+)-(?P<variant>{variant_alt})-(?P<alpine>alpine.*)$"
           )
 
-          # candidates[mm][variant] = list of (patch:int, alpine_key:tuple, tag:str)
           candidates: dict[str, dict[str, list[tuple[int, tuple, str]]]] = {}
 
           for t in tags:
@@ -161,7 +169,6 @@ jobs:
               fh.write("base_php=\n")
             sys.exit(0)
 
-          # 5) Pick next minors strictly greater than base_mm, up to LIMIT
           newer = [mm for mm in upstream_mm if mm_key(mm) > mm_key(base_mm)]
           if not newer:
             print(f"No newer versions than {base_mm}.")
@@ -185,8 +192,6 @@ jobs:
 
           created: list[str] = []
 
-          # 6) Scaffold: create versions/X.Y/{cli,fpm}/ and copy Dockerfile + pecl.txt from base,
-          # then update FROM to the selected full upstream tag.
           for mm in chosen_mms:
             target_mm_dir = VERSIONS_DIR / mm
             if target_mm_dir.exists():
@@ -232,7 +237,7 @@ jobs:
             - Detected new upstream stable PHP minor version(s): `${{ steps.discover.outputs.new_php }}`
             - Scaffolded from existing version: `${{ steps.discover.outputs.base_php }}`
 
-            Dockerfiles were updated to use full upstream tags: `X.Y.Z-{cli,fpm}-alpine*`.
+            Dockerfiles were updated to use full upstream tags for all variants present in the base PHP branch.
           branch: "bot/add-php-${{ steps.discover.outputs.new_php }}"
           delete-branch: true
           labels: |
