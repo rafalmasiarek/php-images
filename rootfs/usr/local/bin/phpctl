@@ -1,0 +1,633 @@
+#!/bin/sh
+set -eu
+
+PROG="${0##*/}"
+
+PHP_BIN="${PHP_BIN:-php}"
+PHP_FPM_BIN="${PHP_FPM_BIN:-php-fpm}"
+
+PHP_EXT_AVAILABLE_DIR="${PHP_EXT_AVAILABLE_DIR:-/opt/php-ext/conf.d/available}"
+PHP_EXT_ACTIVE_DIR="${PHP_EXT_ACTIVE_DIR:-/usr/local/etc/php/conf.d}"
+
+PHP_FPM_POOL_AVAILABLE_DIR="${PHP_FPM_POOL_AVAILABLE_DIR:-/opt/php-fpm/pool.d/available}"
+PHP_FPM_POOL_ACTIVE_DIR="${PHP_FPM_POOL_ACTIVE_DIR:-/usr/local/etc/php-fpm.d}"
+
+usage() {
+    cat <<EOF
+${PROG} - PHP image control utility
+
+Usage:
+  ${PROG} <command> [subcommand] [options]
+
+Commands:
+  help                 Show this help
+  info                 Show PHP runtime information
+  paths                Show important filesystem paths
+  doctor               Run diagnostics
+  self-test            Run quick runtime checks
+  ext                  Manage PHP extensions
+  fpm                  Manage PHP-FPM pools and config
+  ini                  Inspect PHP ini/config values
+
+Examples:
+  ${PROG} info
+  ${PROG} paths
+  ${PROG} doctor
+  ${PROG} self-test
+  ${PROG} ext list
+  ${PROG} ext enable redis
+  ${PROG} ext disable xdebug
+  ${PROG} ext status redis
+  ${PROG} fpm pool list
+  ${PROG} fpm pool enable www
+  ${PROG} fpm test
+  ${PROG} ini show
+  ${PROG} ini get memory_limit
+
+Run:
+  ${PROG} <command> --help
+
+EOF
+}
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+cmd_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+php_ini_scan_dir() {
+    "${PHP_BIN}" --ini 2>/dev/null | sed -n 's|^Scan for additional .ini files in: ||p' | head -n1
+}
+
+php_loaded_ini() {
+    "${PHP_BIN}" --ini 2>/dev/null | sed -n 's|^Loaded Configuration File: *||p' | head -n1
+}
+
+php_extension_dir() {
+    "${PHP_BIN}" -r 'echo ini_get("extension_dir"), PHP_EOL;' 2>/dev/null || true
+}
+
+resolve_ext_ini() {
+    ext="$1"
+
+    for candidate in \
+        "${PHP_EXT_AVAILABLE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_AVAILABLE_DIR}/${ext}.ini" \
+        "${PHP_EXT_AVAILABLE_DIR}/zz-${ext}.ini"
+    do
+        [ -f "${candidate}" ] && { echo "${candidate}"; return 0; }
+    done
+
+    return 1
+}
+
+resolve_ext_active_ini() {
+    ext="$1"
+
+    for candidate in \
+        "${PHP_EXT_ACTIVE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/zz-${ext}.ini"
+    do
+        [ -e "${candidate}" ] && { echo "${candidate}"; return 0; }
+    done
+
+    return 1
+}
+
+ext_is_loaded() {
+    ext="$1"
+    "${PHP_BIN}" -m 2>/dev/null | grep -qi "^${ext}\$"
+}
+
+show_info() {
+    echo "PHP binary:        $(command -v "${PHP_BIN}" 2>/dev/null || echo not-found)"
+    echo "PHP version:       $("${PHP_BIN}" -r 'echo PHP_VERSION;' 2>/dev/null || echo unknown)"
+    echo "PHP SAPI:          $("${PHP_BIN}" -r 'echo PHP_SAPI;' 2>/dev/null || echo unknown)"
+    echo "Loaded php.ini:    $(php_loaded_ini)"
+    echo "INI scan dir:      $(php_ini_scan_dir)"
+    echo "Extension dir:     $(php_extension_dir)"
+    echo "PHP-FPM binary:    $(command -v "${PHP_FPM_BIN}" 2>/dev/null || echo not-found)"
+}
+
+show_paths() {
+    echo "php binary:            $(command -v "${PHP_BIN}" 2>/dev/null || echo not-found)"
+    echo "php-fpm binary:        $(command -v "${PHP_FPM_BIN}" 2>/dev/null || echo not-found)"
+    echo "loaded php.ini:        $(php_loaded_ini)"
+    echo "php ini scan dir:      $(php_ini_scan_dir)"
+    echo "php extension dir:     $(php_extension_dir)"
+    echo "ext available dir:     ${PHP_EXT_AVAILABLE_DIR}"
+    echo "ext active dir:        ${PHP_EXT_ACTIVE_DIR}"
+    echo "fpm pool available:    ${PHP_FPM_POOL_AVAILABLE_DIR}"
+    echo "fpm pool active:       ${PHP_FPM_POOL_ACTIVE_DIR}"
+}
+
+show_doctor() {
+    echo "[doctor] php binary"
+    if cmd_exists "${PHP_BIN}"; then
+        "${PHP_BIN}" -v | head -n1
+    else
+        echo "FAIL: php binary not found"
+    fi
+
+    echo
+    echo "[doctor] php --ini"
+    "${PHP_BIN}" --ini 2>/dev/null || true
+
+    echo
+    echo "[doctor] extension dir"
+    ext_dir="$(php_extension_dir)"
+    echo "${ext_dir:-unknown}"
+    [ -n "${ext_dir:-}" ] && [ -d "${ext_dir}" ] || echo "WARN: extension_dir does not exist"
+
+    echo
+    echo "[doctor] active ini dir"
+    echo "${PHP_EXT_ACTIVE_DIR}"
+    [ -d "${PHP_EXT_ACTIVE_DIR}" ] || echo "WARN: active ini dir missing"
+
+    echo
+    echo "[doctor] available ext ini dir"
+    echo "${PHP_EXT_AVAILABLE_DIR}"
+    [ -d "${PHP_EXT_AVAILABLE_DIR}" ] || echo "WARN: available ext ini dir missing"
+
+    echo
+    echo "[doctor] loaded modules"
+    "${PHP_BIN}" -m 2>/dev/null || true
+
+    echo
+    echo "[doctor] php-fpm"
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        "${PHP_FPM_BIN}" -t 2>/dev/null || echo "WARN: php-fpm config test failed"
+    else
+        echo "INFO: php-fpm not available"
+    fi
+}
+
+show_self_test() {
+    echo "[self-test] php -v"
+    "${PHP_BIN}" -v
+
+    echo
+    echo "[self-test] php -m"
+    "${PHP_BIN}" -m
+
+    echo
+    echo "[self-test] php --ini"
+    "${PHP_BIN}" --ini
+
+    echo
+    echo "[self-test] php-fpm -t"
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        "${PHP_FPM_BIN}" -t
+    else
+        echo "SKIP: php-fpm binary not found"
+    fi
+}
+
+ext_usage() {
+    cat <<EOF
+Usage:
+  ${PROG} ext <subcommand> [args]
+
+Subcommands:
+  list                 List extensions discovered from available/active dirs
+  status <ext>         Show status of one extension
+  enable <ext>         Enable extension by linking ini into active dir
+  disable <ext>        Disable extension by removing active ini
+  enable-all           Enable all available extensions
+  disable-all          Disable all active extension ini files
+  doctor               Run extension-specific diagnostics
+  help                 Show this help
+
+Examples:
+  ${PROG} ext list
+  ${PROG} ext status redis
+  ${PROG} ext enable redis
+  ${PROG} ext disable redis
+  ${PROG} ext enable-all
+  ${PROG} ext doctor
+
+EOF
+}
+
+ext_list() {
+    tmp="${TMPDIR:-/tmp}/phpctl-ext-list.$$"
+    : > "${tmp}"
+
+    if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
+        for f in "${PHP_EXT_AVAILABLE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            b="$(basename "${f}")"
+            n="${b#docker-php-ext-}"
+            n="${n%.ini}"
+            echo "${n}" >> "${tmp}"
+        done
+    fi
+
+    if [ -d "${PHP_EXT_ACTIVE_DIR}" ]; then
+        for f in "${PHP_EXT_ACTIVE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            b="$(basename "${f}")"
+            n="${b#docker-php-ext-}"
+            n="${n%.ini}"
+            echo "${n}" >> "${tmp}"
+        done
+    fi
+
+    if [ ! -s "${tmp}" ]; then
+        echo "No extensions found in available/active ini directories."
+        rm -f "${tmp}"
+        return 0
+    fi
+
+    sort -u "${tmp}" | while IFS= read -r ext; do
+        avail="no"
+        active="no"
+        loaded="no"
+
+        resolve_ext_ini "${ext}" >/dev/null 2>&1 && avail="yes"
+        resolve_ext_active_ini "${ext}" >/dev/null 2>&1 && active="yes"
+        ext_is_loaded "${ext}" && loaded="yes" || true
+
+        printf "%-20s available=%-3s active=%-3s loaded=%-3s\n" "${ext}" "${avail}" "${active}" "${loaded}"
+    done
+
+    rm -f "${tmp}"
+}
+
+ext_status() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext status <ext>"
+    ext="$1"
+
+    echo "Extension:         ${ext}"
+    echo "Available ini:     $(resolve_ext_ini "${ext}" 2>/dev/null || echo no)"
+    echo "Active ini:        $(resolve_ext_active_ini "${ext}" 2>/dev/null || echo no)"
+    echo "Loaded in PHP:     $(ext_is_loaded "${ext}" && echo yes || echo no)"
+    echo "Extension dir:     $(php_extension_dir)"
+}
+
+ext_enable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext enable <ext>"
+    ext="$1"
+    ini="$(resolve_ext_ini "${ext}" 2>/dev/null || true)"
+
+    [ -n "${ini}" ] || die "No available ini found for extension: ${ext}"
+
+    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+    ln -sf "${ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${ini}")"
+    echo "Enabled: ${ext}"
+}
+
+ext_disable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext disable <ext>"
+    ext="$1"
+
+    removed=0
+    for candidate in \
+        "${PHP_EXT_ACTIVE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/zz-${ext}.ini"
+    do
+        if [ -e "${candidate}" ]; then
+            rm -f "${candidate}"
+            removed=1
+        fi
+    done
+
+    [ "${removed}" -eq 1 ] && echo "Disabled: ${ext}" || echo "Nothing to disable for: ${ext}"
+}
+
+ext_enable_all() {
+    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+
+    found=0
+    for f in "${PHP_EXT_AVAILABLE_DIR}"/*.ini; do
+        [ -e "${f}" ] || continue
+        found=1
+        ln -sf "${f}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${f}")"
+        echo "Enabled: $(basename "${f}")"
+    done
+
+    [ "${found}" -eq 1 ] || echo "No available extension ini files found."
+}
+
+ext_disable_all() {
+    found=0
+    for f in "${PHP_EXT_ACTIVE_DIR}"/*.ini; do
+        [ -e "${f}" ] || continue
+        found=1
+        rm -f "${f}"
+        echo "Disabled: $(basename "${f}")"
+    done
+
+    [ "${found}" -eq 1 ] || echo "No active extension ini files found."
+}
+
+ext_doctor() {
+    echo "[ext doctor] available dir: ${PHP_EXT_AVAILABLE_DIR}"
+    [ -d "${PHP_EXT_AVAILABLE_DIR}" ] || echo "WARN: missing available dir"
+
+    echo "[ext doctor] active dir: ${PHP_EXT_ACTIVE_DIR}"
+    [ -d "${PHP_EXT_ACTIVE_DIR}" ] || echo "WARN: missing active dir"
+
+    echo "[ext doctor] extension_dir: $(php_extension_dir)"
+
+    echo
+    echo "[ext doctor] php -m"
+    "${PHP_BIN}" -m 2>/dev/null || true
+
+    echo
+    echo "[ext doctor] discovered extension ini files"
+    ext_list
+}
+
+handle_ext() {
+    [ $# -gt 0 ] || { ext_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h) ext_usage ;;
+        list) shift; ext_list "$@" ;;
+        status) shift; ext_status "$@" ;;
+        enable) shift; ext_enable "$@" ;;
+        disable) shift; ext_disable "$@" ;;
+        enable-all) shift; ext_enable_all "$@" ;;
+        disable-all) shift; ext_disable_all "$@" ;;
+        doctor) shift; ext_doctor "$@" ;;
+        *) die "Unknown ext subcommand: $1" ;;
+    esac
+}
+
+fpm_usage() {
+    cat <<EOF
+Usage:
+  ${PROG} fpm <subcommand> [args]
+
+Subcommands:
+  status               Show php-fpm binary and config test result
+  test                 Run php-fpm -t
+  pool list            List available and active pools
+  pool enable <name>   Enable pool config by linking it into active dir
+  pool disable <name>  Disable pool config by removing it from active dir
+  pool show <name>     Show pool file paths
+  help                 Show this help
+
+Examples:
+  ${PROG} fpm status
+  ${PROG} fpm test
+  ${PROG} fpm pool list
+  ${PROG} fpm pool enable www
+  ${PROG} fpm pool disable www
+  ${PROG} fpm pool show www
+
+EOF
+}
+
+fpm_status() {
+    echo "PHP-FPM binary: $(command -v "${PHP_FPM_BIN}" 2>/dev/null || echo not-found)"
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        "${PHP_FPM_BIN}" -t
+    fi
+}
+
+fpm_test() {
+    cmd_exists "${PHP_FPM_BIN}" || die "php-fpm binary not found"
+    "${PHP_FPM_BIN}" -t
+}
+
+resolve_pool_available() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}"
+    do
+        [ -f "${candidate}" ] && { echo "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+resolve_pool_active() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}"
+    do
+        [ -e "${candidate}" ] && { echo "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+fpm_pool_list() {
+    echo "Available pools:"
+    if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
+        ls -1 "${PHP_FPM_POOL_AVAILABLE_DIR}" 2>/dev/null || true
+    else
+        echo "(missing dir)"
+    fi
+
+    echo
+    echo "Active pools:"
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        ls -1 "${PHP_FPM_POOL_ACTIVE_DIR}" 2>/dev/null || true
+    else
+        echo "(missing dir)"
+    fi
+}
+
+fpm_pool_enable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool enable <name>"
+    name="$1"
+    src="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+    [ -n "${src}" ] || die "Pool not found in available dir: ${name}"
+
+    mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+    ln -sf "${src}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")"
+    echo "Enabled pool: ${name}"
+}
+
+fpm_pool_disable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool disable <name>"
+    name="$1"
+    dst="$(resolve_pool_active "${name}" 2>/dev/null || true)"
+    [ -n "${dst}" ] || die "Pool not active: ${name}"
+    rm -f "${dst}"
+    echo "Disabled pool: ${name}"
+}
+
+fpm_pool_show() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool show <name>"
+    name="$1"
+    echo "Available: $(resolve_pool_available "${name}" 2>/dev/null || echo no)"
+    echo "Active:    $(resolve_pool_active "${name}" 2>/dev/null || echo no)"
+}
+
+handle_fpm() {
+    [ $# -gt 0 ] || { fpm_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h) fpm_usage ;;
+        status) shift; fpm_status "$@" ;;
+        test) shift; fpm_test "$@" ;;
+        pool)
+            shift
+            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|enable|disable|show> ..."
+            case "$1" in
+                help|--help|-h) fpm_usage ;;
+                list) shift; fpm_pool_list "$@" ;;
+                enable) shift; fpm_pool_enable "$@" ;;
+                disable) shift; fpm_pool_disable "$@" ;;
+                show) shift; fpm_pool_show "$@" ;;
+                *) die "Unknown fpm pool subcommand: $1" ;;
+            esac
+            ;;
+        *) die "Unknown fpm subcommand: $1" ;;
+    esac
+}
+
+ini_usage() {
+    cat <<EOF
+Usage:
+  ${PROG} ini <subcommand> [args]
+
+Subcommands:
+  show                 Show php --ini output
+  get <key>            Read a single ini value
+  scan                 Show additional ini scan directory
+  loaded               Show loaded php.ini path
+  help                 Show this help
+
+Examples:
+  ${PROG} ini show
+  ${PROG} ini get memory_limit
+  ${PROG} ini get opcache.enable
+  ${PROG} ini scan
+  ${PROG} ini loaded
+
+EOF
+}
+
+ini_show() {
+    "${PHP_BIN}" --ini
+}
+
+ini_get() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ini get <key>"
+    key="$1"
+    "${PHP_BIN}" -r 'echo ini_get($argv[1]), PHP_EOL;' "${key}"
+}
+
+ini_scan() {
+    php_ini_scan_dir
+}
+
+ini_loaded() {
+    php_loaded_ini
+}
+
+handle_ini() {
+    [ $# -gt 0 ] || { ini_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h) ini_usage ;;
+        show) shift; ini_show "$@" ;;
+        get) shift; ini_get "$@" ;;
+        scan) shift; ini_scan "$@" ;;
+        loaded) shift; ini_loaded "$@" ;;
+        *) die "Unknown ini subcommand: $1" ;;
+    esac
+}
+
+case "${1:-help}" in
+    help|--help|-h)
+        usage
+        ;;
+    info)
+        shift
+        [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+            cat <<EOF
+Usage:
+  ${PROG} info
+
+Show basic PHP runtime information.
+
+Example:
+  ${PROG} info
+
+EOF
+            exit 0
+        }
+        show_info
+        ;;
+    paths)
+        shift
+        [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+            cat <<EOF
+Usage:
+  ${PROG} paths
+
+Show important filesystem paths used by PHP, extensions and FPM.
+
+Example:
+  ${PROG} paths
+
+EOF
+            exit 0
+        }
+        show_paths
+        ;;
+    doctor)
+        shift
+        [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+            cat <<EOF
+Usage:
+  ${PROG} doctor
+
+Run general diagnostics for PHP runtime, ini, extensions and php-fpm.
+
+Example:
+  ${PROG} doctor
+
+EOF
+            exit 0
+        }
+        show_doctor
+        ;;
+    self-test)
+        shift
+        [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] && {
+            cat <<EOF
+Usage:
+  ${PROG} self-test
+
+Run a quick operational test of PHP CLI, modules and php-fpm config.
+
+Example:
+  ${PROG} self-test
+
+EOF
+            exit 0
+        }
+        show_self_test
+        ;;
+    ext)
+        shift
+        handle_ext "$@"
+        ;;
+    fpm)
+        shift
+        handle_fpm "$@"
+        ;;
+    ini)
+        shift
+        handle_ini "$@"
+        ;;
+    *)
+        usage
+        die "Unknown command: $1"
+        ;;
+esac
