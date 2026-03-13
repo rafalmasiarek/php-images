@@ -12,6 +12,7 @@ REPO = os.getenv("GITHUB_REPOSITORY", "rafalmasiarek/php-images")
 IMAGE_NAME = "php"
 REGISTRY_IMAGE = f"ghcr.io/{REPO.split('/')[0]}/{IMAGE_NAME}"
 SITE_BASE_URL = os.getenv("SITE_BASE_URL", "").rstrip("/")
+BADGE_VERSION = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA", "")[:7] or "local"
 
 
 def detect_alpine(dockerfile: Path) -> str:
@@ -48,7 +49,12 @@ def php_key(value: str) -> tuple[int, ...]:
 
 
 def shields_endpoint_url(endpoint_url: str) -> str:
-    return "https://img.shields.io/endpoint?url=" + quote(endpoint_url, safe="")
+    return (
+        "https://img.shields.io/endpoint"
+        f"?url={quote(endpoint_url, safe='')}"
+        f"&cacheSeconds=300"
+        f"&v={quote(BADGE_VERSION, safe='')}"
+    )
 
 
 def shields_static_url(label: str, message: str, color: str) -> str:
@@ -57,6 +63,8 @@ def shields_static_url(label: str, message: str, color: str) -> str:
         f"?label={quote(label, safe='')}"
         f"&message={quote(message, safe='')}"
         f"&color={quote(color, safe='')}"
+        f"&cacheSeconds=300"
+        f"&v={quote(BADGE_VERSION, safe='')}"
     )
 
 
