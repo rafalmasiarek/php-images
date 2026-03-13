@@ -57,7 +57,7 @@ jobs:
 
           export CHANGED="$changed"
 
-          python3 - <<'PY' > /tmp/matrix.env
+          MATRIX_JSON="$(python3 - <<'PY'
           import json
           import os
           import re
@@ -80,10 +80,10 @@ jobs:
               "tag": f"local/php-{mm}-{variant}:report"
             })
 
-          print("MATRIX_JSON=" + json.dumps({"include": include}))
+          print(json.dumps({"include": include}, separators=(",", ":")))
           PY
+          )"
 
-          . /tmp/matrix.env
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
