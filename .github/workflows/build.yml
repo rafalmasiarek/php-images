@@ -1107,6 +1107,9 @@ jobs:
 
             const toBulletList = values =>
               values.length ? values.map(v => `- \`${v}\``).join("\n") : "- none";
+            
+            const toIndentedBulletList = values =>
+              values.length ? values.map(v => `  - \`${v}\``).join("\n") : "  - none";
 
             const uniq = values => [...new Set(values)].sort();
 
@@ -1189,7 +1192,7 @@ jobs:
                 `- Matched hotfix scripts: \`${matchedHotfixScripts.length}\``,
                 `- CVE present after rebuild: \`yes\``,
                 `- Affected variants after rebuild:`,
-                toBulletList(variants),
+                toIndentedBulletList(variants),
                 ``,
                 `## Workflow context`,
                 `- Workflow: ${context.workflow}`,
