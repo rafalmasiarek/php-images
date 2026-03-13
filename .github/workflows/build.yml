@@ -999,8 +999,7 @@ jobs:
                           "alpine_full_versions": set(),
                           "php_branches": set(),
                           "variants": set(),
-                          "packages": set(),
-                          "fixed_versions": set(),
+                          "package_rows": set(),
                           "primary_urls": set(),
                           "images": [],
                           "matched_hotfix_scripts": set(),
@@ -1017,10 +1016,15 @@ jobs:
                       group["php_branches"].add(php)
                   if item.get("variant"):
                       group["variants"].add(item["variant"])
-                  if item.get("package"):
-                      group["packages"].add(item["package"])
-                  if item.get("fixed_version"):
-                      group["fixed_versions"].add(item["fixed_version"])
+
+                  group["package_rows"].add(
+                      (
+                          item.get("package") or "",
+                          item.get("installed_version") or "",
+                          item.get("fixed_version") or "",
+                      )
+                  )
+
                   if item.get("primary_url"):
                       group["primary_urls"].add(item["primary_url"])
 
@@ -1061,8 +1065,14 @@ jobs:
                       "alpine_full_versions": sorted(group["alpine_full_versions"]),
                       "php_branches": sorted(group["php_branches"]),
                       "variants": sorted(group["variants"]),
-                      "packages": sorted(group["packages"]),
-                      "fixed_versions": sorted(group["fixed_versions"]),
+                      "package_rows": [
+                          {
+                              "package": pkg,
+                              "installed_version": installed,
+                              "fixed_version": fixed,
+                          }
+                          for pkg, installed, fixed in sorted(group["package_rows"])
+                      ],
                       "primary_urls": sorted(group["primary_urls"]),
                       "images": images,
                       "matched_hotfix_scripts": sorted(group["matched_hotfix_scripts"]),
@@ -1171,11 +1181,10 @@ jobs:
               const cveLabel = `cve:${group.cve}`;
               const phpBranches = uniq(group.php_branches || []);
               const variants = uniq(group.variants || []);
-              const packages = uniq(group.packages || []);
+              const packageRows = group.package_rows || [];
               const matchedHotfixScripts = uniq(group.matched_hotfix_scripts || []);
               const references = uniq(group.primary_urls || []);
               const alpineFull = uniq(group.alpine_full_versions || []);
-              const fixedVersions = uniq(group.fixed_versions || []);
 
               await ensureLabel(alpineLabel, "1d76db", `Alpine ${group.alpine_minor}`);
               await ensureLabel(cveLabel, "d93f0b", `CVE ${group.cve}`);
@@ -1212,6 +1221,18 @@ jobs:
                 ? references.map(url => `- ${url}`).join("\n")
                 : "- none";
 
+              const packageTable = packageRows.length
+                ? [
+                    `| Package | Installed version | Fixed version |`,
+                    `|---|---|---|`,
+                    ...packageRows.map(row =>
+                      `| \`${row.package || "unknown"}\` | \`${row.installed_version || "unknown"}\` | \`${row.fixed_version || "unknown"}\` |`
+                    ),
+                  ].join("\n")
+                : "- none";
+
+              const packageNames = uniq(packageRows.map(row => row.package).filter(Boolean));
+
               const body = [
                 `Automated Trivy scan detected an unresolved vulnerability.`,
                 ``,
@@ -1221,7 +1242,6 @@ jobs:
                 ...(group.scope === "php" ? [`- PHP branch: \`${group.php}\``] : []),
                 `- Alpine branch: \`${group.alpine_minor}\``,
                 `- Alpine version detected in affected images: \`${alpineFull.length ? alpineFull.join(", ") : "unknown"}\``,
-                `- Fixed package version: \`${fixedVersions.length ? fixedVersions.join(", ") : "unknown"}\``,
                 ``,
                 ...(group.scope === "os"
                   ? [
@@ -1234,7 +1254,7 @@ jobs:
                 toBulletList(variants),
                 ``,
                 `## Affected packages`,
-                toBulletList(packages),
+                packageTable,
                 ``,
                 `## Affected images`,
                 imagesBlock,
@@ -1264,7 +1284,7 @@ jobs:
                 `<!-- cve-key:${key} -->`,
                 `<!-- php-branches:${phpBranches.join(",")} -->`,
                 `<!-- variants:${variants.join(",")} -->`,
-                `<!-- packages:${packages.join(",")} -->`,
+                `<!-- packages:${packageNames.join(",")} -->`,
                 `<!-- matched-hotfix-scripts:${matchedHotfixScripts.length} -->`,
               ].join("\n");
 
