@@ -1,8 +1,30 @@
 #!/bin/sh
+# MIT License
+#
+# Copyright (c) 2026 Rafal Masiarek
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files, to deal in the Software
+# without restriction, including without limitation the rights to use, copy,
+# modify, merge, publish, distribute, sublicense, and/or sell copies of the
+# Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 set -eu
 
 PROG="${0##*/}"
-VERSION="0.3.2"
+VERSION="0.3.3"
 
 OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
 
@@ -29,6 +51,12 @@ PHP_BUILD_DEPS_VIRTUAL="${PHPCTL_PHP_BUILD_DEPS_VIRTUAL:-.phpctl-php-ext-build}"
 PHP_BUILD_DEPS="${PHPCTL_PHP_BUILD_DEPS:-${PHP_BUILD_DEPS:-${PHPIZE_DEPS:-autoconf dpkg-dev dpkg file g++ gcc libc-dev make pkgconf re2c} linux-headers pkgconfig re2c git binutils}}"
 
 PHPCTL_SERVE_LISTEN="${PHPCTL_SERVE_LISTEN:-0.0.0.0:8080}"
+PHPCTL_SERVER_LISTEN="${PHPCTL_SERVER_LISTEN:-${PHPCTL_SERVE_LISTEN}}"
+PHPCTL_CLIENT_CONF="${PHPCTL_CLIENT_CONF:-${HOME:-/root}/.phpctl/client.conf}"
+
+PHPCTL_REMOTE_MODE=""
+PHPCTL_REMOTE_HOST=""
+PHPCTL_REMOTE_CREDENTIALS=""
 
 cmd_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -347,7 +375,7 @@ ext_core_dir() {
 
 ext_is_known_core() {
     case "$1" in
-        bcmath|bz2|calendar|ctype|curl|dba|dom|enchant|exif|ffi|fileinfo|ftp|gd|gettext|gmp|iconv|imap|intl|ldap|mbstring|mysqli|opcache|pcntl|pdo|pdo_mysql|pdo_pgsql|pdo_sqlite|pgsql|phar|posix|shmop|simplexml|snmp|soap|sockets|sodium|sysvmsg|sysvsem|sysvshm|tokenizer|xml|xmlreader|xmlwriter|xsl|zip)
+        bcmath|bz2|calendar|ctype|curl|dba|dom|enchant|exif|ffi|fileinfo|ftp|gd|gettext|gmp|iconv|imap|intl|ldap|mbstring|mysqli|opcache|pcntl|pdo|pdo_mysql|pdo_pgsql|pdo_sqlite|pgsql|phar|posix|shmop|simplexml|snmp|soap|sockets|sodium|sysvmsg|sysvsem|sysvshm|tidy|tokenizer|xml|xmlreader|xmlwriter|xsl|zip)
             return 0
             ;;
         *)
@@ -358,16 +386,12 @@ ext_is_known_core() {
 
 ext_detect_type_value() {
     ext="$1"
-    if [ -d "$(ext_core_dir "${ext}")" ]; then
+    if ext_is_known_core "${ext}"; then
         printf '%s\n' "core"
         return 0
     fi
     if cmd_exists "${PECL_BIN}" && "${PECL_BIN}" remote-info "${ext}" >/dev/null 2>&1; then
         printf '%s\n' "pecl"
-        return 0
-    fi
-    if ext_is_known_core "${ext}"; then
-        printf '%s\n' "core-known-but-source-missing"
         return 0
     fi
     printf '%s\n' "unknown"
@@ -442,6 +466,29 @@ ext_write_ini() {
     printf '%s\n' "${ini_path}"
 }
 
+# Prepare PHP source tree in the same way as the official helper.
+php_source_prepare() {
+    src_exists=""
+    if [ -d "${PHP_SRC_DIR}" ]; then
+        src_exists="1"
+    fi
+
+    cmd_exists docker-php-source || die "docker-php-source command not found"
+    docker-php-source extract
+
+    if [ -z "${src_exists}" ]; then
+        touch "${PHP_SRC_DIR}/.docker-delete-me"
+    fi
+}
+
+# Clean PHP source tree only if phpctl extracted it for this run.
+php_source_cleanup() {
+    if [ -e "${PHP_SRC_DIR}/.docker-delete-me" ]; then
+        cmd_exists docker-php-source || die "docker-php-source command not found"
+        docker-php-source delete
+    fi
+}
+
 ext_detect() {
     [ $# -eq 1 ] || die "Usage: ${PROG} ext detect <ext>"
     ext="$1"
@@ -449,14 +496,11 @@ ext_detect() {
     buildable="no"
     installable="no"
     case "${detected}" in
-        core)
-            buildable="yes"
-            installable="yes"
-            ;;
-        pecl)
+        core|pecl)
             installable="yes"
             ;;
     esac
+    [ "${detected}" = "core" ] && buildable="yes"
     emit_object <<EOF
 name=${ext}
 type=${detected}
@@ -466,6 +510,7 @@ core_dir=$(ext_core_dir "${ext}")
 EOF
 }
 
+# Build and install a core extension from PHP sources.
 ext_install_core() {
     ext="$1"
     jobs="$2"
@@ -476,8 +521,9 @@ ext_install_core() {
     runtime_pkgs="$7"
     configure_args_file="$8"
 
-    core_dir="$(ext_core_dir "${ext}")"
-    [ -d "${core_dir}" ] || die "Core extension source directory not found: ${core_dir}"
+    cleanup_core_install() {
+        php_source_cleanup
+    }
 
     if [ -n "${runtime_pkgs}" ]; then
         apk_add_if_any ${runtime_pkgs}
@@ -489,8 +535,19 @@ ext_install_core() {
         apk_add_if_any ${apk_deps}
     fi
 
+    php_source_prepare
+    trap cleanup_core_install EXIT INT TERM
+
+    core_dir="$(ext_core_dir "${ext}")"
+    [ -d "${core_dir}" ] || die "Core extension source directory not found: ${core_dir}"
+
     oldpwd="$(pwd)"
     cd "${core_dir}"
+
+    : "${CFLAGS:=${PHP_CFLAGS:-}}"
+    : "${CPPFLAGS:=${PHP_CPPFLAGS:-}}"
+    : "${LDFLAGS:=${PHP_LDFLAGS:-}}"
+    export CFLAGS CPPFLAGS LDFLAGS
 
     if [ ! -f configure ]; then
         "${PHPIZE_BIN}"
@@ -502,12 +559,20 @@ ext_install_core() {
             [ -n "${arg}" ] || continue
             set -- "$@" "${arg}"
         done < "${configure_args_file}"
-        ./configure "$@"
+        ./configure --enable-option-checking=fatal "$@"
     else
-        ./configure
+        ./configure --enable-option-checking=fatal
     fi
 
     "${MAKE_BIN}" -j"${jobs}"
+
+    if ! "${PHP_BIN}" -n -d 'display_errors=stderr' -r 'exit(ZEND_DEBUG_BUILD ? 0 : 1);' >/dev/null 2>&1; then
+        find modules \
+            -maxdepth 1 \
+            -name '*.so' \
+            -exec sh -euxc 'strip --strip-all "$@" || :' -- '{}' +
+    fi
+
     "${MAKE_BIN}" install
     "${MAKE_BIN}" clean >/dev/null 2>&1 || true
 
@@ -522,11 +587,15 @@ ext_install_core() {
         ln -sf "${available_ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
     fi
 
+    trap - EXIT INT TERM
+    php_source_cleanup
+
     if [ "${no_cleanup}" != "yes" ]; then
         php_build_deps_cleanup
     fi
 }
 
+# Install an extension from PECL.
 ext_install_pecl() {
     ext="$1"
     version="$2"
@@ -578,6 +647,8 @@ ${PROG} - PHP image control utility
 
 Usage:
   ${PROG} [--output text|json|tsv] <command> [subcommand] [options]
+  ${PROG} --client [--host <socket|host:port>] [--credentials <user:password>] <command> ...
+  ${PROG} --server [--listen <socket|host:port>]
 
 Commands:
   help                 Show this help
@@ -590,6 +661,8 @@ Commands:
   health               Show runtime health
   metrics              Show metrics
   serve                Serve health, status and metrics
+  server               Serve HTTP API for remote control
+  client               Call remote phpctl API
   ext                  Manage PHP extensions
   fpm                  Manage PHP-FPM pools and config
   ini                  Inspect PHP ini/config values
@@ -597,17 +670,12 @@ Commands:
 Examples:
   ${PROG} version
   ${PROG} info
-  ${PROG} paths
-  ${PROG} doctor
-  ${PROG} self-test
-  ${PROG} status
-  ${PROG} health
-  ${PROG} metrics
   ${PROG} ext list
-  ${PROG} ext enable redis
   ${PROG} ext install redis --enable
   ${PROG} fpm pool list
-  ${PROG} ini get memory_limit
+  ${PROG} fpm pool bundle import --json-file /tmp/pools.json --reload
+  ${PROG} --server --listen 0.0.0.0:8080
+  ${PROG} --client --host 127.0.0.1:8080 info
 
 Run:
   ${PROG} <command> --help
@@ -618,7 +686,7 @@ EOF
 name=${PROG}
 version=${VERSION}
 usage=${PROG} [--output text|json|tsv] <command> [subcommand] [options]
-commands=help,version,info,paths,doctor,self-test,status,health,metrics,serve,ext,fpm,ini
+commands=help,version,info,paths,doctor,self-test,status,health,metrics,serve,server,client,ext,fpm,ini
 default_output=${OUTPUT_FORMAT}
 output_formats=text,json,tsv
 EOF
@@ -1294,12 +1362,12 @@ ext_doctor() {
     fi
     printf 'extension_dir\t%s\t%s\n' "${s3}" "${d3}" >> "${tmp}"
 
-    if [ -d "${PHP_SRC_DIR}" ]; then
+    if [ -d "${PHP_SRC_DIR}" ] || [ -f /usr/src/php.tar.xz ]; then
         s4="ok"
         d4="${PHP_SRC_DIR}"
     else
         s4="warn"
-        d4="missing: ${PHP_SRC_DIR}"
+        d4="missing: ${PHP_SRC_DIR} and /usr/src/php.tar.xz"
     fi
     printf 'php_src_dir\t%s\t%s\n' "${s4}" "${d4}" >> "${tmp}"
 
@@ -1446,10 +1514,6 @@ ext_install() {
         case "${detected}" in
             core) type="core" ;;
             pecl) type="pecl" ;;
-            core-known-but-source-missing)
-                rm -f "${configure_args_file}"
-                die "Extension looks like a core extension but PHP source tree is missing: ${ext}"
-                ;;
             *)
                 rm -f "${configure_args_file}"
                 die "Unable to detect extension type for: ${ext}"
@@ -1993,6 +2057,28 @@ EOF
     esac
 }
 
+fpm_pool_bundle_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
+
+Import multiple pool definitions from a JSON bundle.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_bundle
+usage=${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
 fpm_pool_render() {
     [ $# -gt 0 ] || { fpm_pool_render_usage; return 0; }
     name="$1"
@@ -2281,6 +2367,211 @@ active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTI
 EOF
 }
 
+# Import multiple pools from JSON without requiring a mounted volume.
+fpm_pool_bundle_import() {
+    json_string=""
+    json_file=""
+    do_reload="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --json"
+                json_string="$1"
+                shift
+                ;;
+            --json-file)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --json-file"
+                json_file="$1"
+                shift
+                ;;
+            --reload)
+                do_reload="yes"
+                shift
+                ;;
+            -h|--help)
+                fpm_pool_bundle_usage
+                return 0
+                ;;
+            *)
+                die "Unknown pool bundle import option: $1"
+                ;;
+        esac
+    done
+
+    [ -n "${json_string}" ] || [ -n "${json_file}" ] || die "One of --json or --json-file is required"
+    [ -z "${json_string}" ] || [ -z "${json_file}" ] || die "Use only one of --json or --json-file"
+
+    input_file="$(mktemp_file)"
+    result_file="$(mktemp_file)"
+
+    if [ -n "${json_file}" ]; then
+        [ -f "${json_file}" ] || { rm -f "${input_file}" "${result_file}"; die "JSON file not found: ${json_file}"; }
+        cp "${json_file}" "${input_file}"
+    else
+        printf '%s\n' "${json_string}" > "${input_file}"
+    fi
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}" "${PHP_FPM_POOL_ACTIVE_DIR}"
+
+    PHPCTL_JSON_FILE="${input_file}" \
+    PHPCTL_TEMPLATE_DEFAULT="${PHP_FPM_POOL_TEMPLATE}" \
+    PHPCTL_POOL_AVAILABLE_DIR="${PHP_FPM_POOL_AVAILABLE_DIR}" \
+    PHPCTL_POOL_ACTIVE_DIR="${PHP_FPM_POOL_ACTIVE_DIR}" \
+    PHPCTL_RESULT_FILE="${result_file}" \
+    PHPCTL_SELF_PATH="$0" \
+    "${PHP_BIN}" -r '
+        function fail(string $message): void {
+            fwrite(STDERR, $message . PHP_EOL);
+            exit(1);
+        }
+
+        function writeParamsFile(array $params): string {
+            $file = tempnam(sys_get_temp_dir(), "phpctl_pool_params_");
+            if ($file === false) {
+                fail("Unable to create params file");
+            }
+            $lines = [];
+            foreach ($params as $k => $v) {
+                $lines[] = $k . "=" . (string) $v;
+            }
+            file_put_contents($file, implode(PHP_EOL, $lines) . PHP_EOL);
+            return $file;
+        }
+
+        $json = file_get_contents(getenv("PHPCTL_JSON_FILE"));
+        if ($json === false || trim($json) === "") {
+            fail("Empty JSON bundle");
+        }
+
+        $data = json_decode($json, true);
+        if (!is_array($data)) {
+            fail("Invalid JSON bundle");
+        }
+
+        $defaultEnabled = isset($data["enabled"]) ? (bool) $data["enabled"] : true;
+        $pools = $data["pools"] ?? null;
+        if (!is_array($pools)) {
+            fail("Bundle must contain pools array");
+        }
+
+        $result = [];
+
+        foreach ($pools as $pool) {
+            if (!is_array($pool)) {
+                fail("Invalid pool entry");
+            }
+
+            $name = (string) ($pool["name"] ?? "");
+            if ($name === "") {
+                fail("Pool name is required");
+            }
+
+            $template = (string) ($pool["template"] ?? "");
+            $enabled = array_key_exists("enabled", $pool) ? (bool) $pool["enabled"] : $defaultEnabled;
+            $params = $pool["params"] ?? [];
+            if (!is_array($params)) {
+                fail("Pool params must be an object");
+            }
+
+            $renderParams = [
+                "POOL_NAME" => $name,
+                "USER" => "www-data",
+                "GROUP" => "www-data",
+                "LISTEN" => "/var/run/php-fpm-" . $name . ".sock",
+                "LISTEN_OWNER" => "www-data",
+                "LISTEN_GROUP" => "www-data",
+                "PM" => "dynamic",
+                "PM_MAX_CHILDREN" => "8",
+                "PM_START_SERVERS" => "2",
+                "PM_MIN_SPARE_SERVERS" => "1",
+                "PM_MAX_SPARE_SERVERS" => "3",
+                "CATCH_WORKERS_OUTPUT" => "yes",
+                "CLEAR_ENV" => "no",
+                "ENABLE_METRICS" => "false",
+                "STATUS_PATH" => "",
+                "ENABLE_PING" => "false",
+                "PING_PATH" => "",
+                "PING_RESPONSE" => "",
+            ];
+
+            foreach ($params as $k => $v) {
+                $renderParams[(string) $k] = is_scalar($v) || $v === null ? (string) $v : json_encode($v);
+            }
+
+            $paramsFile = writeParamsFile($renderParams);
+            $cmd = [getenv("PHPCTL_SELF_PATH"), "fpm", "pool", "create", $name, "--params-file", $paramsFile];
+            if ($template !== "") {
+                $cmd[] = "--template";
+                $cmd[] = $template;
+            }
+            if ($enabled) {
+                $cmd[] = "--enable";
+            }
+
+            $descriptors = [
+                0 => ["pipe", "r"],
+                1 => ["pipe", "w"],
+                2 => ["pipe", "w"],
+            ];
+            $proc = proc_open($cmd, $descriptors, $pipes);
+            if (!is_resource($proc)) {
+                @unlink($paramsFile);
+                fail("Unable to execute phpctl for pool " . $name);
+            }
+
+            fclose($pipes[0]);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $exitCode = proc_close($proc);
+            @unlink($paramsFile);
+
+            if ($exitCode !== 0) {
+                fail("Pool " . $name . " failed: " . trim((string) $stderr));
+            }
+
+            $result[] = [
+                "name" => $name,
+                "enabled" => $enabled,
+                "stdout" => trim((string) $stdout),
+            ];
+        }
+
+        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+
+    if [ "${do_reload}" = "yes" ]; then
+        fpm_reload >/dev/null 2>&1 || true
+    fi
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'ok: yes\n'
+            printf 'action: bundle-import\n'
+            printf 'reload: %s\n' "${do_reload}"
+            printf 'result: %s\n' "$(cat "${result_file}")"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+ok=yes
+action=bundle-import
+reload=${do_reload}
+result=$(cat "${result_file}")
+EOF
+            ;;
+        *)
+            rm -f "${input_file}" "${result_file}"
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    rm -f "${input_file}" "${result_file}"
+}
+
 fpm_usage() {
     case "${OUTPUT_FORMAT}" in
         text)
@@ -2298,32 +2589,20 @@ Subcommands:
   pool create <name>   Create pool config in the available dir
   pool generate <name> Generate pool config for manual editing
   pool import <name>   Import existing pool config file
+  pool bundle import   Import multiple pools from JSON
   pool enable <name>   Enable pool config by linking it into active dir
   pool disable <name>  Disable pool config by removing it from active dir
   pool delete <name>   Delete pool config
   pool validate <name> Validate pool config by running php-fpm -t
   pool show <name>     Show pool file paths
   help                 Show this help
-
-Examples:
-  ${PROG} fpm status
-  ${PROG} fpm test
-  ${PROG} fpm reload
-  ${PROG} fpm pool list
-  ${PROG} fpm pool render app -p ENABLE_METRICS=true
-  ${PROG} fpm pool create app -p ENABLE_METRICS=true --enable
-  ${PROG} fpm pool generate app --output-file ./app.conf
-  ${PROG} fpm pool import app --from ./app.conf --enable
-  ${PROG} fpm pool enable www
-  ${PROG} fpm pool disable www
-  ${PROG} fpm pool show www
 EOF
             ;;
         json|tsv)
             emit_object <<EOF
 section=fpm
 usage=${PROG} fpm <subcommand> [args]
-subcommands=status,test,configtest,reload,pool list,pool render,pool create,pool generate,pool import,pool enable,pool disable,pool delete,pool validate,pool show,help
+subcommands=status,test,configtest,reload,pool list,pool render,pool create,pool generate,pool import,pool bundle import,pool enable,pool disable,pool delete,pool validate,pool show,help
 EOF
             ;;
         *)
@@ -2555,7 +2834,7 @@ handle_fpm() {
             ;;
         pool)
             shift
-            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|render|create|generate|import|enable|disable|delete|validate|show> ..."
+            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|render|create|generate|import|bundle|enable|disable|delete|validate|show> ..."
             case "$1" in
                 help|--help|-h)
                     fpm_usage
@@ -2579,6 +2858,19 @@ handle_fpm() {
                 import)
                     shift
                     fpm_pool_import "$@"
+                    ;;
+                bundle)
+                    shift
+                    [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool bundle import ..."
+                    case "$1" in
+                        import)
+                            shift
+                            fpm_pool_bundle_import "$@"
+                            ;;
+                        *)
+                            die "Unknown fpm pool bundle subcommand: $1"
+                            ;;
+                    esac
                     ;;
                 enable)
                     shift
@@ -2624,13 +2916,6 @@ Subcommands:
   scan                 Show additional ini scan directory
   loaded               Show loaded php.ini path
   help                 Show this help
-
-Examples:
-  ${PROG} ini show
-  ${PROG} ini get memory_limit
-  ${PROG} ini get opcache.enable
-  ${PROG} ini scan
-  ${PROG} ini loaded
 EOF
             ;;
         json|tsv)
@@ -2805,6 +3090,466 @@ EOF
     esac
 }
 
+client_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
+
+Client configuration file:
+  ${PHPCTL_CLIENT_CONF}
+
+Config format:
+  host=
+  user=
+  password=
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=client
+usage=${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
+client_conf=${PHPCTL_CLIENT_CONF}
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+server_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} server [--listen <socket|host:port>]
+
+Serve /healthz, /readyz, /status, /metrics and POST /run over HTTP.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=server
+usage=${PROG} server [--listen <socket|host:port>]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+# Read client config from file when host or credentials are not passed explicitly.
+phpctl_client_load_config() {
+    conf_file="$1"
+    conf_host=""
+    conf_user=""
+    conf_password=""
+
+    [ -f "${conf_file}" ] || return 0
+
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        case "${line}" in
+            \#*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            host) conf_host="${value}" ;;
+            user) conf_user="${value}" ;;
+            password|pasword) conf_password="${value}" ;;
+        esac
+    done < "${conf_file}"
+
+    [ -n "${PHPCTL_REMOTE_HOST}" ] || PHPCTL_REMOTE_HOST="${conf_host}"
+    if [ -z "${PHPCTL_REMOTE_CREDENTIALS}" ] && [ -n "${conf_user}" ] && [ -n "${conf_password}" ]; then
+        PHPCTL_REMOTE_CREDENTIALS="${conf_user}:${conf_password}"
+    fi
+}
+
+# Build JSON payload for the remote API from argv and requested output format.
+phpctl_client_build_payload() {
+    args_file="$(mktemp_file)"
+    payload_file="$(mktemp_file)"
+    : > "${args_file}"
+
+    for arg in "$@"; do
+        printf '%s\n' "${arg}" >> "${args_file}"
+    done
+
+    PHPCTL_ARGS_FILE="${args_file}" PHPCTL_PAYLOAD_FILE="${payload_file}" PHPCTL_OUTPUT_VALUE="${OUTPUT_FORMAT}" "${PHP_BIN}" -r '
+        $args = file(getenv("PHPCTL_ARGS_FILE"), FILE_IGNORE_NEW_LINES) ?: [];
+        $payload = [
+            "argv" => array_values($args),
+            "output" => getenv("PHPCTL_OUTPUT_VALUE") ?: "text",
+        ];
+        file_put_contents(getenv("PHPCTL_PAYLOAD_FILE"), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+
+    rm -f "${args_file}"
+    printf '%s\n' "${payload_file}"
+}
+
+# Send one HTTP request using TCP or Unix socket.
+phpctl_client_send_http() {
+    host="$1"
+    auth="$2"
+    payload_file="$3"
+
+    response_file="$(mktemp_file)"
+    request_file="$(mktemp_file)"
+    payload_len="$(wc -c < "${payload_file}" | tr -d '[:space:]')"
+    auth_header=""
+
+    if [ -n "${auth}" ]; then
+        auth_value="$("${PHP_BIN}" -r 'echo base64_encode($argv[1]);' "${auth}")"
+        auth_header="Authorization: Basic ${auth_value}\r\n"
+    fi
+
+    {
+        printf 'POST /run HTTP/1.1\r\n'
+        printf 'Host: phpctl\r\n'
+        printf 'Content-Type: application/json\r\n'
+        printf 'Content-Length: %s\r\n' "${payload_len}"
+        printf '%b' "${auth_header}"
+        printf 'Connection: close\r\n'
+        printf '\r\n'
+        cat "${payload_file}"
+    } > "${request_file}"
+
+    case "${host}" in
+        /*)
+            "${NC_BIN}" -U "${host}" < "${request_file}" > "${response_file}" 2>/dev/null || {
+                rm -f "${request_file}" "${response_file}"
+                die "Unable to connect to socket: ${host}"
+            }
+            ;;
+        *)
+            tcp_host="${host%:*}"
+            tcp_port="${host##*:}"
+            [ -n "${tcp_host}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
+            [ -n "${tcp_port}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
+            "${NC_BIN}" "${tcp_host}" "${tcp_port}" < "${request_file}" > "${response_file}" 2>/dev/null || {
+                rm -f "${request_file}" "${response_file}"
+                die "Unable to connect to host: ${host}"
+            }
+            ;;
+    esac
+
+    rm -f "${request_file}"
+    printf '%s\n' "${response_file}"
+}
+
+# Parse wrapped JSON response and print remote stdout/stderr locally.
+phpctl_client_consume_response() {
+    response_file="$1"
+
+    body_file="$(mktemp_file)"
+    awk 'BEGIN { body=0 } body { print } /^\r?$/ { body=1 }' "${response_file}" > "${body_file}"
+
+    PHPCTL_BODY_FILE="${body_file}" "${PHP_BIN}" -r '
+        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
+        if ($body === false || trim($body) === "") {
+            fwrite(STDERR, "Empty response body\n");
+            exit(1);
+        }
+
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            fwrite(STDERR, $body);
+            exit(1);
+        }
+
+        $stdout = (string) ($json["stdout"] ?? "");
+        $stderr = (string) ($json["stderr"] ?? "");
+        $exitCode = (int) ($json["exit_code"] ?? 1);
+
+        if ($stdout !== "") {
+            fwrite(STDOUT, $stdout);
+            if (substr($stdout, -1) !== "\n") {
+                fwrite(STDOUT, "\n");
+            }
+        }
+
+        if ($stderr !== "") {
+            fwrite(STDERR, $stderr);
+            if (substr($stderr, -1) !== "\n") {
+                fwrite(STDERR, "\n");
+            }
+        }
+
+        exit($exitCode);
+    '
+    rm -f "${body_file}"
+}
+
+phpctl_client_run() {
+    host=""
+    credentials=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --host)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --host"
+                host="$1"
+                shift
+                ;;
+            --credentials)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --credentials"
+                credentials="$1"
+                shift
+                ;;
+            -h|--help)
+                client_usage
+                return 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    [ $# -gt 0 ] || die "Client requires a remote command"
+
+    PHPCTL_REMOTE_HOST="${host}"
+    PHPCTL_REMOTE_CREDENTIALS="${credentials}"
+    phpctl_client_load_config "${PHPCTL_CLIENT_CONF}"
+
+    [ -n "${PHPCTL_REMOTE_HOST}" ] || die "Remote host is not configured"
+
+    payload_file="$(phpctl_client_build_payload "$@")"
+    response_file="$(phpctl_client_send_http "${PHPCTL_REMOTE_HOST}" "${PHPCTL_REMOTE_CREDENTIALS}" "${payload_file}")"
+    rm -f "${payload_file}"
+
+    phpctl_client_consume_response "${response_file}"
+    rc=$?
+    rm -f "${response_file}"
+    return "${rc}"
+}
+
+# Execute a JSON payload by spawning the same phpctl binary locally.
+phpctl_server_run_payload() {
+    body_file="$1"
+    result_file="$2"
+
+    PHPCTL_BODY_FILE="${body_file}" PHPCTL_RESULT_FILE="${result_file}" PHPCTL_SELF_PATH="$0" "${PHP_BIN}" -r '
+        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
+        $data = json_decode((string) $body, true);
+
+        if (!is_array($data)) {
+            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+                "ok" => false,
+                "exit_code" => 1,
+                "stdout" => "",
+                "stderr" => "Invalid JSON payload",
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            exit(0);
+        }
+
+        $argv = $data["argv"] ?? [];
+        if (!is_array($argv)) {
+            $argv = [];
+        }
+
+        $output = (string) ($data["output"] ?? "text");
+
+        $cmd = [getenv("PHPCTL_SELF_PATH"), "--output", $output];
+        foreach ($argv as $arg) {
+            $cmd[] = (string) $arg;
+        }
+
+        $descriptors = [
+            0 => ["pipe", "r"],
+            1 => ["pipe", "w"],
+            2 => ["pipe", "w"],
+        ];
+
+        $proc = proc_open($cmd, $descriptors, $pipes);
+        if (!is_resource($proc)) {
+            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+                "ok" => false,
+                "exit_code" => 1,
+                "stdout" => "",
+                "stderr" => "Unable to spawn phpctl command",
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            exit(0);
+        }
+
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($proc);
+
+        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+            "ok" => $exitCode === 0,
+            "exit_code" => $exitCode,
+            "stdout" => (string) $stdout,
+            "stderr" => (string) $stderr,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+}
+
+phpctl_server_http_response() {
+    status_line="$1"
+    content_type="$2"
+    body_file="$3"
+
+    body_len="$(wc -c < "${body_file}" | tr -d '[:space:]')"
+    printf 'HTTP/1.1 %s\r\n' "${status_line}"
+    printf 'Content-Type: %s\r\n' "${content_type}"
+    printf 'Content-Length: %s\r\n' "${body_len}"
+    printf 'Connection: close\r\n'
+    printf '\r\n'
+    cat "${body_file}"
+}
+
+# Handle a single HTTP connection on stdin/stdout.
+phpctl_server_handle_connection() {
+    req_file="$(mktemp_file)"
+    body_file="$(mktemp_file)"
+    response_body="$(mktemp_file)"
+    result_file="$(mktemp_file)"
+    status_line="404 Not Found"
+    content_type="application/json"
+    content_length="0"
+
+    cat > "${req_file}"
+
+    request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
+    method="$(printf '%s' "${request_line}" | awk '{print $1}')"
+    path="$(printf '%s' "${request_line}" | awk '{print $2}')"
+
+    while IFS= read -r header_line; do
+        header_line="$(printf '%s' "${header_line}" | tr -d '\r')"
+        [ -n "${header_line}" ] || break
+        case "${header_line}" in
+            [Cc]ontent-[Ll]ength:*)
+                content_length="$(printf '%s' "${header_line#*:}" | tr -d '[:space:]')"
+                ;;
+        esac
+    done < "${req_file}"
+
+    awk 'BEGIN { body=0 } body { print } /^\r?$/ { body=1 }' "${req_file}" > "${body_file}"
+
+    case "${method}:${path}" in
+        GET:/healthz|GET:/readyz)
+            if "${0}" --output json health > "${response_body}" 2>/dev/null; then
+                status_line="200 OK"
+            else
+                printf '{"ok":false}\n' > "${response_body}"
+                status_line="503 Service Unavailable"
+            fi
+            ;;
+        GET:/status)
+            "${0}" --output json status > "${response_body}"
+            status_line="200 OK"
+            ;;
+        GET:/metrics)
+            "${0}" --output text metrics > "${response_body}"
+            status_line="200 OK"
+            content_type="text/plain; version=0.0.4"
+            ;;
+        POST:/run)
+            if [ "${content_length:-0}" -gt 0 ] 2>/dev/null; then
+                phpctl_server_run_payload "${body_file}" "${result_file}"
+                cat "${result_file}" > "${response_body}"
+                status_line="200 OK"
+            else
+                printf '{"ok":false,"exit_code":1,"stdout":"","stderr":"Empty request body"}\n' > "${response_body}"
+                status_line="400 Bad Request"
+            fi
+            ;;
+        *)
+            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
+            status_line="404 Not Found"
+            ;;
+    esac
+
+    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
+
+    rm -f "${req_file}" "${body_file}" "${response_body}" "${result_file}"
+}
+
+# Serve one connection using nc over TCP or Unix socket.
+phpctl_server_run_listener_once() {
+    listen="$1"
+
+    in_fifo="$(mktemp_file)"
+    out_fifo="$(mktemp_file)"
+    rm -f "${in_fifo}" "${out_fifo}"
+    mkfifo "${in_fifo}" "${out_fifo}"
+
+    case "${listen}" in
+        /*)
+            rm -f "${listen}"
+            "${NC_BIN}" -l -U "${listen}" < "${out_fifo}" > "${in_fifo}" 2>/dev/null &
+            ;;
+        *)
+            listen_host="${listen%:*}"
+            listen_port="${listen##*:}"
+            [ -n "${listen_port}" ] || { rm -f "${in_fifo}" "${out_fifo}"; die "Invalid listen value: ${listen}"; }
+            "${NC_BIN}" -l -p "${listen_port}" < "${out_fifo}" > "${in_fifo}" 2>/dev/null &
+            ;;
+    esac
+    nc_pid="$!"
+
+    phpctl_server_handle_connection < "${in_fifo}" > "${out_fifo}" || true
+
+    wait "${nc_pid}" 2>/dev/null || true
+    rm -f "${in_fifo}" "${out_fifo}"
+}
+
+phpctl_server_run() {
+    listen="${PHPCTL_SERVER_LISTEN}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --listen)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --listen"
+                listen="$1"
+                shift
+                ;;
+            -h|--help)
+                server_usage
+                return 0
+                ;;
+            *)
+                die "Unknown server option: $1"
+                ;;
+        esac
+    done
+
+    cmd_exists "${NC_BIN}" || die "nc binary not found"
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'server_listen: %s\n' "${listen}"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+listen=${listen}
+mode=single-file
+transport=nc
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    while :; do
+        phpctl_server_run_listener_once "${listen}"
+    done
+}
+
 serve_http() {
     listen="${PHPCTL_SERVE_LISTEN}"
 
@@ -2845,59 +3590,7 @@ EOF
     esac
 
     while :; do
-        req_file="$(mktemp_file)"
-        body_file="$(mktemp_file)"
-        response_file="$(mktemp_file)"
-
-        if "${NC_BIN}" -l -p "${listen##*:}" > "${req_file}" 2>/dev/null; then
-            :
-        else
-            rm -f "${req_file}" "${body_file}" "${response_file}"
-            die "Unable to bind serve listener"
-        fi
-
-        request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
-        path="$(printf '%s' "${request_line}" | awk '{print $2}')"
-
-        status_line="404 Not Found"
-        content_type="application/json"
-
-        case "${path}" in
-            /healthz|/readyz)
-                if "${0}" --output json health > "${body_file}" 2>/dev/null; then
-                    status_line="200 OK"
-                else
-                    printf '{"ok":false}\n' > "${body_file}"
-                    status_line="503 Service Unavailable"
-                fi
-                ;;
-            /status)
-                "${0}" --output json status > "${body_file}"
-                status_line="200 OK"
-                ;;
-            /metrics)
-                "${0}" --output text metrics > "${body_file}"
-                status_line="200 OK"
-                content_type="text/plain; version=0.0.4"
-                ;;
-            *)
-                printf '{"ok":false,"error":"not found"}\n' > "${body_file}"
-                ;;
-        esac
-
-        body_len="$(wc -c < "${body_file}" | tr -d '[:space:]')"
-        {
-            printf 'HTTP/1.1 %s\r\n' "${status_line}"
-            printf 'Content-Type: %s\r\n' "${content_type}"
-            printf 'Content-Length: %s\r\n' "${body_len}"
-            printf 'Connection: close\r\n'
-            printf '\r\n'
-            cat "${body_file}"
-        } > "${response_file}"
-
-        cat "${response_file}" | "${NC_BIN}" -l -p "${listen##*:}" >/dev/null 2>&1 || true
-
-        rm -f "${req_file}" "${body_file}" "${response_file}"
+        phpctl_server_run_listener_once "${listen}"
     done
 }
 
@@ -2916,11 +3609,29 @@ while [ $# -gt 0 ]; do
             esac
             shift
             ;;
+        --client)
+            PHPCTL_REMOTE_MODE="client"
+            shift
+            ;;
+        --server)
+            PHPCTL_REMOTE_MODE="server"
+            shift
+            ;;
         *)
             break
             ;;
     esac
 done
+
+if [ "${PHPCTL_REMOTE_MODE}" = "client" ]; then
+    phpctl_client_run "$@"
+    exit $?
+fi
+
+if [ "${PHPCTL_REMOTE_MODE}" = "server" ]; then
+    phpctl_server_run "$@"
+    exit $?
+fi
 
 case "${1:-help}" in
     help|--help|-h)
@@ -2960,8 +3671,6 @@ EOF
                     cat <<EOF
 Usage:
   ${PROG} info
-
-Show basic PHP runtime information.
 EOF
                     ;;
                 json|tsv)
@@ -2986,8 +3695,6 @@ EOF
                     cat <<EOF
 Usage:
   ${PROG} paths
-
-Show important filesystem paths used by PHP, extensions and FPM.
 EOF
                     ;;
                 json|tsv)
@@ -3012,8 +3719,6 @@ EOF
                     cat <<EOF
 Usage:
   ${PROG} doctor
-
-Run general diagnostics for PHP runtime, ini, extensions and php-fpm.
 EOF
                     ;;
                 json|tsv)
@@ -3083,6 +3788,14 @@ EOF
     serve)
         shift
         serve_http "$@"
+        ;;
+    server)
+        shift
+        phpctl_server_run "$@"
+        ;;
+    client)
+        shift
+        phpctl_client_run "$@"
         ;;
     ext)
         shift
