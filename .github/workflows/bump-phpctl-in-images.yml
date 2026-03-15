@@ -1,0 +1,205 @@
+name: bump-phpctl-in-images
+
+on:
+    workflow_dispatch:
+        inputs:
+            phpctl_version:
+                description: "phpctl version to set in Dockerfiles, for example 0.5.1"
+                required: true
+                type: string
+            php_versions:
+                description: "Comma-separated PHP branches like 8.2,8.3 or all"
+                required: false
+                default: "all"
+                type: string
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: bump-phpctl-in-images-${{ github.event.inputs.phpctl_version }}
+    cancel-in-progress: false
+
+jobs:
+    discover:
+        name: Discover targets
+        runs-on: ubuntu-latest
+        outputs:
+            matrix: ${{ steps.discover.outputs.matrix }}
+            count: ${{ steps.discover.outputs.count }}
+            branch: ${{ steps.meta.outputs.branch }}
+            title: ${{ steps.meta.outputs.title }}
+            body: ${{ steps.discover.outputs.body }}
+
+        steps:
+            - uses: actions/checkout@v6
+
+            - name: Validate version
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  version="${{ github.event.inputs.phpctl_version }}"
+
+                  if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]; then
+                    echo "Invalid phpctl version: ${version}"
+                    exit 1
+                  fi
+
+            - name: Compute metadata
+              id: meta
+              shell: bash
+              run: |
+                  version="${{ github.event.inputs.phpctl_version }}"
+
+                  echo "branch=chore/bump-phpctl-v${version}" >> "$GITHUB_OUTPUT"
+                  echo "title=chore(images): bump phpctl to ${version}" >> "$GITHUB_OUTPUT"
+
+            - name: Discover Dockerfiles
+              id: discover
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  VERSION="${{ github.event.inputs.phpctl_version }}"
+                  PHP_VERSIONS_RAW="${{ github.event.inputs.php_versions }}"
+
+                  export VERSION PHP_VERSIONS_RAW
+
+                  python3 - <<'PY' > /tmp/discover.env
+                  import json
+                  import os
+                  import re
+                  from pathlib import Path
+
+                  root = Path("versions")
+
+                  php_versions_raw = os.environ["PHP_VERSIONS_RAW"].strip()
+
+                  dockerfiles = []
+
+                  for f in sorted(root.glob("*/*/Dockerfile")):
+                      php = f.parts[1]
+                      variant = f.parts[2]
+
+                      dockerfiles.append({
+                          "php": php,
+                          "variant": variant,
+                          "dockerfile": str(f)
+                      })
+
+                  if php_versions_raw.lower() == "all":
+                      selected = dockerfiles
+                      php_versions = sorted({d["php"] for d in dockerfiles})
+
+                  else:
+                      requested = [p.strip() for p in php_versions_raw.split(",") if p.strip()]
+                      selected = [d for d in dockerfiles if d["php"] in requested]
+                      php_versions = sorted(set(requested))
+
+                      if not selected:
+                          raise SystemExit("No Dockerfiles matched selected PHP versions")
+
+                  body = [
+                      f"Bump phpctl to `{os.environ['VERSION']}`.",
+                      "",
+                      "### PHP branches"
+                  ]
+
+                  for php in php_versions:
+                      body.append(f"- `{php}`")
+
+                  body.append("")
+                  body.append("### Targets")
+
+                  for d in selected:
+                      body.append(f"- `{d['php']}/{d['variant']}`")
+
+                  print("matrix=" + json.dumps({"include": selected}))
+                  print("count=" + str(len(selected)))
+                  print("body<<EOF")
+                  print("\n".join(body))
+                  print("EOF")
+                  PY
+
+                  cat /tmp/discover.env >> "$GITHUB_OUTPUT"
+
+    create-pr:
+        name: Create PR
+        needs: discover
+        if: needs.discover.outputs.count != '0'
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v6
+
+            - name: Update Dockerfiles
+              shell: bash
+              env:
+                  MATRIX: ${{ needs.discover.outputs.matrix }}
+                  VERSION: ${{ github.event.inputs.phpctl_version }}
+              run: |
+                  set -euo pipefail
+
+                  python3 - <<'PY'
+                  import json
+                  import os
+                  import re
+                  from pathlib import Path
+
+                  matrix = json.loads(os.environ["MATRIX"])
+
+                  version = os.environ["VERSION"]
+
+                  for item in matrix["include"]:
+
+                      dockerfile = Path(item["dockerfile"])
+
+                      content = dockerfile.read_text()
+
+                      new, n = re.subn(
+                          r'^ARG PHPCTL_VERSION=.*$',
+                          f'ARG PHPCTL_VERSION={version}',
+                          content,
+                          flags=re.MULTILINE
+                      )
+
+                      if n == 0:
+                          raise SystemExit(f"ARG PHPCTL_VERSION not found in {dockerfile}")
+
+                      dockerfile.write_text(new)
+                  PY
+
+            - name: Create branch and commit
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  branch="${{ needs.discover.outputs.branch }}"
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  git checkout -b "$branch"
+
+                  git add versions/*/*/Dockerfile
+
+                  if git diff --cached --quiet; then
+                    echo "No changes"
+                    exit 0
+                  fi
+
+                  git commit -m "${{ needs.discover.outputs.title }}"
+
+                  git push origin "$branch"
+
+            - name: Create PR
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  gh pr create \
+                    --base main \
+                    --head "${{ needs.discover.outputs.branch }}" \
+                    --title "${{ needs.discover.outputs.title }}" \
+                    --body "${{ needs.discover.outputs.body }}"

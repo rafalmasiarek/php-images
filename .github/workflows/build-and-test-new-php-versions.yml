@@ -164,7 +164,6 @@ jobs:
           set -euo pipefail
 
           python3 - <<'PY' > /tmp/alpine_versions.env
-          import json
           import re
           import subprocess
           from pathlib import Path
@@ -369,6 +368,110 @@ jobs:
           echo "remaining_count=${#REMAINING_CVES[@]}" >> "$GITHUB_OUTPUT"
           echo "new_count=${#NEW_CVES[@]}" >> "$GITHUB_OUTPUT"
 
+      - name: Run phpctl smoke tests
+        id: phpctl_smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          img="${{ matrix.tag }}"
+          log="/tmp/phpctl-smoke-${{ matrix.mm }}-${{ matrix.variant }}.txt"
+
+          {
+            echo "### phpctl smoke tests for $img"
+            echo
+
+            echo "== phpctl version =="
+            docker run --rm "$img" sh -lc 'phpctl version'
+
+            echo
+            echo "== phpctl help =="
+            docker run --rm "$img" sh -lc 'phpctl help | sed -n "1,25p"'
+
+            echo
+            echo "== phpctl json version =="
+            docker run --rm "$img" sh -lc 'phpctl --output json version'
+
+            echo
+            echo "== phpctl json info =="
+            docker run --rm "$img" sh -lc 'phpctl --output json info'
+
+            echo
+            echo "== phpctl json paths =="
+            docker run --rm "$img" sh -lc 'phpctl --output json paths'
+
+            echo
+            echo "== phpctl json doctor =="
+            docker run --rm "$img" sh -lc 'phpctl --output json doctor'
+
+            echo
+            echo "== phpctl json self-test =="
+            docker run --rm "$img" sh -lc 'phpctl --output json self-test'
+
+            echo
+            echo "== phpctl json ext list =="
+            docker run --rm "$img" sh -lc 'phpctl --output json ext list'
+
+            echo
+            echo "== phpctl json ext versions =="
+            docker run --rm "$img" sh -lc 'phpctl --output json ext versions'
+
+            echo
+            echo "== phpctl ext detect gd =="
+            docker run --rm "$img" sh -lc 'phpctl ext detect gd'
+
+            echo
+            echo "== phpctl ext detect redis =="
+            docker run --rm "$img" sh -lc 'phpctl ext detect redis || true'
+
+            echo
+            echo "== phpctl ini show =="
+            docker run --rm "$img" sh -lc 'phpctl --output json ini show'
+
+            echo
+            echo "== phpctl ini get memory_limit =="
+            docker run --rm "$img" sh -lc 'phpctl --output json ini get memory_limit'
+
+            if [ "${{ matrix.variant }}" = "fpm" ]; then
+              echo
+              echo "== phpctl fpm status =="
+              docker run --rm "$img" sh -lc 'phpctl --output json fpm status'
+
+              echo
+              echo "== phpctl fpm test =="
+              docker run --rm "$img" sh -lc 'phpctl --output json fpm test || true'
+
+              echo
+              echo "== phpctl fpm pool render =="
+              docker run --rm "$img" sh -lc 'phpctl fpm pool render smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke'
+
+              echo
+              echo "== phpctl fpm pool create/show/enable/disable/delete =="
+              docker run --rm "$img" sh -lc '
+                set -eu
+                phpctl fpm pool create smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke
+                phpctl --output json fpm pool show smoke
+                phpctl --output json fpm pool enable smoke
+                phpctl --output json fpm pool disable smoke
+                phpctl --output json fpm pool delete smoke
+              '
+            else
+              echo
+              echo "== phpctl status =="
+              docker run --rm "$img" sh -lc 'phpctl --output json status || true'
+
+              echo
+              echo "== phpctl health =="
+              docker run --rm "$img" sh -lc 'phpctl --output json health || true'
+
+              echo
+              echo "== phpctl metrics =="
+              docker run --rm "$img" sh -lc 'phpctl metrics | sed -n "1,30p" || true'
+            fi
+          } | tee "$log"
+
+          echo "log=$log" >> "$GITHUB_OUTPUT"
+
       - name: Collect phpctl outputs
         shell: bash
         run: |
@@ -378,9 +481,18 @@ jobs:
 
           docker run --rm "$img" sh -lc 'phpctl version' > /tmp/phpctl-version.txt
           docker run --rm "$img" sh -lc 'phpctl --output json info' > /tmp/phpctl-info.json
+          docker run --rm "$img" sh -lc 'phpctl --output json paths' > /tmp/phpctl-paths.json
+          docker run --rm "$img" sh -lc 'phpctl --output json doctor' > /tmp/phpctl-doctor.json
+          docker run --rm "$img" sh -lc 'phpctl --output json self-test' > /tmp/phpctl-self-test.json
           docker run --rm "$img" sh -lc 'phpctl --output json ini show' > /tmp/phpctl-ini-show.json
           docker run --rm "$img" sh -lc 'phpctl --output json ext list' > /tmp/phpctl-ext-list.json
           docker run --rm "$img" sh -lc 'phpctl --output json ext so-list' > /tmp/phpctl-ext-so-list.json
+
+          if [ "${{ matrix.variant }}" = "fpm" ]; then
+            docker run --rm "$img" sh -lc 'phpctl --output json fpm status' > /tmp/phpctl-fpm-status.json || echo '{}' > /tmp/phpctl-fpm-status.json
+          else
+            echo '{}' > /tmp/phpctl-fpm-status.json
+          fi
 
       - name: Generate PHP and security report
         id: report
@@ -397,6 +509,7 @@ jobs:
           PHP_VARIANT: ${{ matrix.variant }}
           IMAGE_TAG: ${{ matrix.tag }}
           PECL_FILE_PATH: ${{ matrix.pecl_file }}
+          PHPCTL_SMOKE_LOG: ${{ steps.phpctl_smoke.outputs.log }}
         run: |
           set -euo pipefail
           out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
@@ -468,12 +581,17 @@ jobs:
           pre = load_json("trivy-results-pre.json")
           post = load_json("trivy-results-post.json")
           info = load_json("/tmp/phpctl-info.json")
+          paths = load_json("/tmp/phpctl-paths.json")
+          doctor = load_json("/tmp/phpctl-doctor.json")
+          self_test = load_json("/tmp/phpctl-self-test.json")
           ini_show = load_json("/tmp/phpctl-ini-show.json")
           ext_list = load_json("/tmp/phpctl-ext-list.json")
           so_list = load_json("/tmp/phpctl-ext-so-list.json")
+          fpm_status = load_json("/tmp/phpctl-fpm-status.json")
 
           phpctl_version = Path("/tmp/phpctl-version.txt").read_text(encoding="utf-8").strip()
           expected = load_expected_pecl(os.environ["PECL_FILE_PATH"])
+          smoke_log = Path(os.environ["PHPCTL_SMOKE_LOG"]).read_text(encoding="utf-8") if os.environ.get("PHPCTL_SMOKE_LOG") else ""
 
           pre_counts = counts(pre)
           post_counts = counts(post)
@@ -527,6 +645,19 @@ jobs:
           print(f"**Image (local):** `{os.environ['IMAGE_TAG']}`")
           print()
           print(f"**phpctl:** `{phpctl_version}`")
+          print()
+          print("### phpctl smoke tests")
+          print()
+          print("- Overall result: `passed`")
+          print()
+          print("<details>")
+          print("<summary>Show phpctl smoke test log</summary>")
+          print()
+          print("```text")
+          print(smoke_log.rstrip())
+          print("```")
+          print()
+          print("</details>")
           print()
           print("### Security summary")
           print()
@@ -586,6 +717,22 @@ jobs:
           print(f"| INI scan dir | `{md_escape(info.get('ini_scan_dir', '-'))}` |")
           print(f"| Extension dir | `{md_escape(info.get('extension_dir', '-'))}` |")
           print(f"| Parsed ini files | `{md_escape(ini_show.get('parsed_files_count', '0'))}` |")
+
+          print()
+          print("### phpctl diagnostics")
+          print()
+          print("| Key | Value |")
+          print("|---|---|")
+          print(f"| ext available dir | `{md_escape(paths.get('ext_available_dir', '-'))}` |")
+          print(f"| ext active dir | `{md_escape(paths.get('ext_active_dir', '-'))}` |")
+          print(f"| fpm pool available dir | `{md_escape(paths.get('fpm_pool_available_dir', '-'))}` |")
+          print(f"| fpm pool active dir | `{md_escape(paths.get('fpm_pool_active_dir', '-'))}` |")
+          print(f"| doctor php_fpm_bin | `{md_escape(str(doctor.get('php_fpm_bin', '-')) if isinstance(doctor, dict) else '-')}` |")
+          print(f"| self-test php_fpm_test | `{md_escape(str(self_test.get('php_fpm_test', '-')) if isinstance(self_test, dict) else '-')}` |")
+
+          if os.environ["PHP_VARIANT"] == "fpm":
+              print(f"| fpm available | `{md_escape(str(fpm_status.get('available', '-')) if isinstance(fpm_status, dict) else '-')}` |")
+              print(f"| fpm config ok | `{md_escape(str(fpm_status.get('config_ok', '-')) if isinstance(fpm_status, dict) else '-')}` |")
 
           print()
           print("### Extension status")
@@ -657,6 +804,12 @@ jobs:
         with:
           name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
           path: ${{ steps.report.outputs.path }}
+
+      - name: Upload phpctl smoke log artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: phpctl-smoke-${{ matrix.mm }}-${{ matrix.variant }}
+          path: ${{ steps.phpctl_smoke.outputs.log }}
 
       - name: Upload Trivy pre-scan artifact
         uses: actions/upload-artifact@v7
