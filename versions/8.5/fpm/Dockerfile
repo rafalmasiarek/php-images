@@ -66,14 +66,13 @@ RUN set -eux; \
   phpctl version
 
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-COPY --from=builder /opt/php-ext/conf.d/available/ /opt/php-ext/conf.d/available/
+COPY --from=builder /usr/local/etc/php/conf.d/available/ /usr/local/etc/php/conf.d/available/
 COPY .hotfixes-selected/ /opt/hotfixes-selected/
 COPY .lifecycle.env /usr/local/share/php-image-lifecycle.env
 COPY rootfs/ /
 
 RUN set -eux; \
-  mkdir -p /usr/local/etc/php/conf.d; \
-  mkdir -p /opt/php-ext/conf.d/available; \
+  mkdir -p /usr/local/etc/php/conf.d /usr/local/etc/php/conf.d/available; \
   rm -f /usr/local/etc/php/conf.d/docker-php-ext-*.ini || true; \
   rm -f /usr/local/etc/php/conf.d/zz-*.ini || true; \
   if [ -d /opt/hotfixes-selected ]; then \

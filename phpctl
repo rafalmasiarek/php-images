@@ -4,11 +4,11 @@
 # Copyright (c) 2026 Rafal Masiarek
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files, to deal in the Software
-# without restriction, including without limitation the rights to use, copy,
-# modify, merge, publish, distribute, sublicense, and/or sell copies of the
-# Software, and to permit persons to whom the Software is furnished to do so,
-# subject to the following conditions:
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
 #
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
@@ -24,7 +24,7 @@
 set -eu
 
 PROG="${0##*/}"
-VERSION="0.3.4"
+VERSION="0.3.5"
 
 OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
 
@@ -35,6 +35,7 @@ PHPIZE_BIN="${PHPCTL_PHPIZE_BIN:-${PHPIZE_BIN:-phpize}}"
 MAKE_BIN="${PHPCTL_MAKE_BIN:-${MAKE_BIN:-make}}"
 READ_ELF_BIN="${PHPCTL_READ_ELF_BIN:-${READ_ELF_BIN:-readelf}}"
 NC_BIN="${PHPCTL_NC_BIN:-${NC_BIN:-nc}}"
+STRIP_BIN="${PHPCTL_STRIP_BIN:-${STRIP_BIN:-strip}}"
 
 PHP_INI_DIR="${PHPCTL_PHP_INI_DIR:-${PHP_INI_DIR:-/usr/local/etc/php}}"
 PHP_EXT_AVAILABLE_DIR="${PHPCTL_PHP_EXT_AVAILABLE_DIR:-${PHP_EXT_AVAILABLE_DIR:-${PHP_INI_DIR}/conf.d/available}}"
@@ -57,6 +58,8 @@ PHPCTL_CLIENT_CONF="${PHPCTL_CLIENT_CONF:-${HOME:-/root}/.phpctl/client.conf}"
 PHPCTL_REMOTE_MODE=""
 PHPCTL_REMOTE_HOST=""
 PHPCTL_REMOTE_CREDENTIALS=""
+
+SELF_PATH="${PHPCTL_SELF_PATH:-$0}"
 
 cmd_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -387,13 +390,17 @@ ext_is_known_core() {
 ext_detect_type_value() {
     ext="$1"
 
-    if ext_is_known_core "${ext}"; then
+    if [ -d "$(ext_core_dir "${ext}")" ]; then
         printf '%s\n' "core"
         return 0
     fi
 
-    if [ -d "$(ext_core_dir "${ext}")" ]; then
-        printf '%s\n' "core"
+    if ext_is_known_core "${ext}"; then
+        if [ -f /usr/src/php.tar.xz ] || cmd_exists docker-php-source; then
+            printf '%s\n' "core-known-but-source-not-extracted"
+            return 0
+        fi
+        printf '%s\n' "core-known-but-source-missing"
         return 0
     fi
 
@@ -417,7 +424,7 @@ ext_already_present() {
         return 0
     fi
 
-    if ext_module_file_exists "${ext}" >/dev/null 2>&1; then
+    if ext_module_file_exists "${ext}"; then
         return 0
     fi
 
@@ -496,7 +503,7 @@ ext_write_ini() {
     printf '%s\n' "${ini_path}"
 }
 
-# Prepare PHP source tree using the official helper from docker-library/php.
+# Prepare PHP source tree using the official helper.
 php_source_prepare() {
     src_exists=""
     if [ -d "${PHP_SRC_DIR}" ]; then
@@ -511,7 +518,7 @@ php_source_prepare() {
     fi
 }
 
-# Delete extracted PHP sources only if phpctl extracted them for this run.
+# Remove PHP sources only if phpctl extracted them for this run.
 php_source_cleanup() {
     if [ -e "${PHP_SRC_DIR}/.docker-delete-me" ]; then
         cmd_exists docker-php-source || die "docker-php-source command not found"
@@ -528,12 +535,16 @@ ext_detect() {
     installable="no"
 
     case "${detected}" in
-        core|pecl)
+        core|pecl|core-known-but-source-not-extracted)
             installable="yes"
             ;;
     esac
 
-    [ "${detected}" = "core" ] && buildable="yes"
+    case "${detected}" in
+        core|core-known-but-source-not-extracted)
+            buildable="yes"
+            ;;
+    esac
 
     emit_object <<EOF
 name=${ext}
@@ -560,8 +571,15 @@ ext_install_core() {
     runtime_pkgs="$7"
     configure_args_file="$8"
 
+    core_cleanup_done="no"
+
     cleanup_core_install() {
+        [ "${core_cleanup_done}" = "yes" ] && return 0
+        core_cleanup_done="yes"
         php_source_cleanup
+        if [ "${no_cleanup}" != "yes" ]; then
+            php_build_deps_cleanup
+        fi
     }
 
     if [ -n "${runtime_pkgs}" ]; then
@@ -609,7 +627,11 @@ ext_install_core() {
         find modules \
             -maxdepth 1 \
             -name '*.so' \
-            -exec sh -euxc 'strip --strip-all "$@" || :' -- '{}' +
+            -exec sh -eu -c '
+                if command -v "'"${STRIP_BIN}"'" >/dev/null 2>&1; then
+                    "'"${STRIP_BIN}"'" --strip-all "$@" || :
+                fi
+            ' sh '{}' +
     fi
 
     "${MAKE_BIN}" install
@@ -627,11 +649,7 @@ ext_install_core() {
     fi
 
     trap - EXIT INT TERM
-    php_source_cleanup
-
-    if [ "${no_cleanup}" != "yes" ]; then
-        php_build_deps_cleanup
-    fi
+    cleanup_core_install
 }
 
 # Install one extension from PECL.
@@ -644,6 +662,12 @@ ext_install_pecl() {
     apk_deps="$6"
     runtime_pkgs="$7"
 
+    cleanup_pecl_install() {
+        if [ "${no_cleanup}" != "yes" ]; then
+            php_build_deps_cleanup
+        fi
+    }
+
     cmd_exists "${PECL_BIN}" || die "pecl binary not found"
 
     if [ -n "${runtime_pkgs}" ]; then
@@ -655,6 +679,8 @@ ext_install_pecl() {
     if [ -n "${apk_deps}" ]; then
         apk_add_if_any ${apk_deps}
     fi
+
+    trap cleanup_pecl_install EXIT INT TERM
 
     package="${ext}"
     if [ -n "${version}" ]; then
@@ -673,9 +699,8 @@ ext_install_pecl() {
         ln -sf "${available_ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
     fi
 
-    if [ "${no_cleanup}" != "yes" ]; then
-        php_build_deps_cleanup
-    fi
+    trap - EXIT INT TERM
+    cleanup_pecl_install
 }
 
 usage() {
@@ -1057,6 +1082,14 @@ pool_config_get_value() {
     ' "${file}" 2>/dev/null || true
 }
 
+prom_label_escape() {
+    "${PHP_BIN}" -r '
+        $s = (string) $argv[1];
+        $s = str_replace(["\\", "\"", "\n"], ["\\\\", "\\\"", "\\n"], $s);
+        echo $s;
+    ' "$1"
+}
+
 show_metrics_text() {
     php_up=0
     fpm_up=0
@@ -1117,8 +1150,8 @@ show_metrics_text() {
                     /*) [ -S "${listen_value}" ] && socket_exists=1 ;;
                 esac
             fi
-            printf 'phpctl_fpm_pool_enabled{pool=%s} 1\n' "$(json_quote "${pool_name}")"
-            printf 'phpctl_fpm_pool_socket_exists{pool=%s} %s\n' "$(json_quote "${pool_name}")" "${socket_exists}"
+            printf 'phpctl_fpm_pool_enabled{pool="%s"} 1\n' "$(prom_label_escape "${pool_name}")"
+            printf 'phpctl_fpm_pool_socket_exists{pool="%s"} %s\n' "$(prom_label_escape "${pool_name}")" "${socket_exists}"
         done
     fi
 }
@@ -1165,18 +1198,6 @@ Subcommands:
   disable-all          Disable all active extension ini files
   doctor               Run extension-specific diagnostics
   help                 Show this help
-
-Examples:
-  ${PROG} ext list
-  ${PROG} ext detect gd
-  ${PROG} ext status redis
-  ${PROG} ext install redis --type pecl --enable
-  ${PROG} ext install gd --type core --enable
-  ${PROG} ext enable redis
-  ${PROG} ext disable redis
-  ${PROG} ext uninstall redis
-  ${PROG} ext enable-all
-  ${PROG} ext doctor
 EOF
             ;;
         json|tsv)
@@ -1223,7 +1244,6 @@ ext_list() {
     fi
 
     render_table_file "${tmp_rows}"
-
     rm -f "${tmp_names}" "${tmp_rows}"
 }
 
@@ -1692,11 +1712,22 @@ ext_install() {
         requested_package="${ext}-${pecl_version}"
     fi
 
+    detected_for_auto=""
     if [ "${type}" = "auto" ]; then
-        detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
-        case "${detected}" in
-            core|pecl)
-                type="${detected}"
+        detected_for_auto="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
+        case "${detected_for_auto}" in
+            core)
+                type="core"
+                ;;
+            pecl)
+                type="pecl"
+                ;;
+            core-known-but-source-not-extracted)
+                type="core"
+                ;;
+            core-known-but-source-missing)
+                rm -f "${configure_args_file}"
+                die "Extension looks like a core extension but PHP source helper or source tarball is missing: ${ext}"
                 ;;
             *)
                 rm -f "${configure_args_file}"
@@ -1714,6 +1745,22 @@ ext_install() {
         rm -f "${configure_args_file}"
         ext_emit_install_skip "${ext}" "${type}" "${enable_after}" "${requested_package}"
         return 0
+    fi
+
+    if [ "${force}" = "yes" ]; then
+        ext_disable "${ext}" >/dev/null 2>&1 || true
+
+        if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+            rm -f "$(resolve_ext_ini "${ext}")"
+        fi
+
+        if [ -f "$(php_extension_dir)/${ext}.so" ]; then
+            rm -f "$(php_extension_dir)/${ext}.so"
+        fi
+
+        if [ "${type}" = "pecl" ] && cmd_exists "${PECL_BIN}"; then
+            "${PECL_BIN}" uninstall -r "${ext}" >/dev/null 2>&1 || true
+        fi
     fi
 
     if [ "${type}" = "pecl" ]; then
@@ -1820,7 +1867,7 @@ ext_uninstall() {
     if [ "${type}" = "auto" ]; then
         detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
         case "${detected}" in
-            core) type="core" ;;
+            core|core-known-but-source-not-extracted|core-known-but-source-missing) type="core" ;;
             pecl) type="pecl" ;;
             *) type="unknown" ;;
         esac
@@ -2073,34 +2120,29 @@ fpm_pool_render_content() {
             $expr = trim($expr);
 
             if (preg_match("/^empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
-                $key = $m[1];
-                return isEmptyValue($params[$key] ?? "");
+                return isEmptyValue($params[$m[1]] ?? "");
             }
 
             if (preg_match("/^not\\s+empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
-                $key = $m[1];
-                return !isEmptyValue($params[$key] ?? "");
+                return !isEmptyValue($params[$m[1]] ?? "");
             }
 
             if (preg_match("/^([A-Z0-9_]+)\\s*==\\s*(.+)$/i", $expr, $m)) {
-                $key = $m[1];
                 $expected = trim($m[2]);
                 $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
                 $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
-                return (string) ($params[$key] ?? "") === $expected;
+                return (string) ($params[$m[1]] ?? "") === $expected;
             }
 
             if (preg_match("/^([A-Z0-9_]+)\\s*!=\\s*(.+)$/i", $expr, $m)) {
-                $key = $m[1];
                 $expected = trim($m[2]);
                 $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
                 $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
-                return (string) ($params[$key] ?? "") !== $expected;
+                return (string) ($params[$m[1]] ?? "") !== $expected;
             }
 
             if (preg_match("/^([A-Z0-9_]+)$/i", $expr, $m)) {
-                $key = $m[1];
-                return isTrueValue($params[$key] ?? "");
+                return isTrueValue($params[$m[1]] ?? "");
             }
 
             return false;
@@ -2162,8 +2204,6 @@ fpm_pool_render_usage() {
             cat <<EOF
 Usage:
   ${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
-
-Show rendered pool configuration.
 EOF
             ;;
         json|tsv)
@@ -2184,8 +2224,6 @@ fpm_pool_create_usage() {
             cat <<EOF
 Usage:
   ${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--enable]
-
-Create pool configuration in the available directory.
 EOF
             ;;
         json|tsv)
@@ -2206,8 +2244,6 @@ fpm_pool_generate_usage() {
             cat <<EOF
 Usage:
   ${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--output-file <file>]
-
-Generate pool configuration for manual editing.
 EOF
             ;;
         json|tsv)
@@ -2228,8 +2264,6 @@ fpm_pool_import_usage() {
             cat <<EOF
 Usage:
   ${PROG} fpm pool import <name> --from <file> [--enable]
-
-Import an existing pool configuration into the available directory.
 EOF
             ;;
         json|tsv)
@@ -2250,8 +2284,6 @@ fpm_pool_bundle_usage() {
             cat <<EOF
 Usage:
   ${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
-
-Import multiple pool definitions from a JSON bundle.
 EOF
             ;;
         json|tsv)
@@ -2605,7 +2637,7 @@ fpm_pool_bundle_import() {
 
     PHPCTL_JSON_FILE="${input_file}" \
     PHPCTL_RESULT_FILE="${result_file}" \
-    PHPCTL_SELF_PATH="$0" \
+    PHPCTL_SELF_PATH="${SELF_PATH}" \
     "${PHP_BIN}" -r '
         function fail(string $message): void {
             fwrite(STDERR, $message . PHP_EOL);
@@ -2901,7 +2933,6 @@ fpm_pool_list() {
     fi
 
     render_table_file "${tmp_rows}"
-
     rm -f "${tmp_names}" "${tmp_rows}"
 }
 
@@ -3192,8 +3223,6 @@ status_usage() {
             cat <<EOF
 Usage:
   ${PROG} status
-
-Show runtime status.
 EOF
             ;;
         json|tsv)
@@ -3214,8 +3243,6 @@ health_usage() {
             cat <<EOF
 Usage:
   ${PROG} health
-
-Show runtime health.
 EOF
             ;;
         json|tsv)
@@ -3236,8 +3263,6 @@ metrics_usage() {
             cat <<EOF
 Usage:
   ${PROG} metrics
-
-Show metrics.
 EOF
             ;;
         json|tsv)
@@ -3336,6 +3361,14 @@ phpctl_is_unix_socket_endpoint() {
     esac
 }
 
+nc_supports_unix_sockets() {
+    "${NC_BIN}" 2>&1 | grep -q -- '-U'
+}
+
+nc_supports_exec() {
+    "${NC_BIN}" 2>&1 | grep -q -- '-e '
+}
+
 phpctl_validate_endpoint() {
     endpoint="$1"
 
@@ -3350,7 +3383,7 @@ phpctl_validate_endpoint() {
             [ -n "${host_part}" ] || return 1
             [ -n "${port_part}" ] || return 1
             case "${port_part}" in
-                *[!0-9]*)
+                *[!0-9]*|'')
                     return 1
                     ;;
             esac
@@ -3360,6 +3393,67 @@ phpctl_validate_endpoint() {
             return 1
             ;;
     esac
+}
+
+http_extract_body() {
+    src="$1"
+    dst="$2"
+    awk '
+        BEGIN { body=0 }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (body) {
+                print line
+            } else if (line == "") {
+                body=1
+            }
+        }
+    ' "${src}" > "${dst}"
+}
+
+http_read_request_meta() {
+    src="$1"
+    meta="$2"
+    awk '
+        BEGIN {
+            method=""
+            path=""
+            content_length="0"
+            headers_done=0
+        }
+        NR == 1 {
+            line=$0
+            sub(/\r$/, "", line)
+            split(line, p, " ")
+            method=p[1]
+            path=p[2]
+            next
+        }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (headers_done == 1) {
+                next
+            }
+            if (line == "") {
+                headers_done=1
+                next
+            }
+            lower=line
+            gsub(/[A-Z]/, "", "") # no-op for POSIX compatibility
+            if (line ~ /^[Cc]ontent-[Ll]ength:[[:space:]]*/) {
+                sub(/^[^:]*:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                content_length=line
+            }
+        }
+        END {
+            print "method=" method
+            print "path=" path
+            print "content_length=" content_length
+        }
+    ' "${src}" > "${meta}"
 }
 
 # Read client config from file when host or credentials are not passed explicitly.
@@ -3443,6 +3537,10 @@ phpctl_client_send_http() {
 
     case "${host}" in
         /*)
+            nc_supports_unix_sockets || {
+                rm -f "${request_file}" "${response_file}"
+                die "Current nc implementation does not support Unix sockets (-U missing)"
+            }
             "${NC_BIN}" -U "${host}" < "${request_file}" > "${response_file}" 2>/dev/null || {
                 rm -f "${request_file}" "${response_file}"
                 die "Unable to connect to socket: ${host}"
@@ -3464,12 +3562,12 @@ phpctl_client_send_http() {
     printf '%s\n' "${response_file}"
 }
 
-# Parse wrapped JSON response and print remote stdout/stderr locally.
+# Parse JSON response body and print remote stdout/stderr locally.
 phpctl_client_consume_response() {
     response_file="$1"
-
     body_file="$(mktemp_file)"
-    awk 'BEGIN { body=0 } body { print } /^\r?$/ { body=1 }' "${response_file}" > "${body_file}"
+
+    http_extract_body "${response_file}" "${body_file}"
 
     PHPCTL_BODY_FILE="${body_file}" "${PHP_BIN}" -r '
         $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
@@ -3504,7 +3602,9 @@ phpctl_client_consume_response() {
 
         exit($exitCode);
     '
+    rc=$?
     rm -f "${body_file}"
+    return "${rc}"
 }
 
 phpctl_client_run() {
@@ -3559,7 +3659,7 @@ phpctl_server_run_payload() {
     body_file="$1"
     result_file="$2"
 
-    PHPCTL_BODY_FILE="${body_file}" PHPCTL_RESULT_FILE="${result_file}" PHPCTL_SELF_PATH="$0" "${PHP_BIN}" -r '
+    PHPCTL_BODY_FILE="${body_file}" PHPCTL_RESULT_FILE="${result_file}" PHPCTL_SELF_PATH="${SELF_PATH}" "${PHP_BIN}" -r '
         $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
         $data = json_decode((string) $body, true);
 
@@ -3636,18 +3736,19 @@ phpctl_server_http_response() {
 phpctl_serve_handle_connection() {
     req_file="$(mktemp_file)"
     response_body="$(mktemp_file)"
+    meta_file="$(mktemp_file)"
     status_line="404 Not Found"
     content_type="application/json"
 
     cat > "${req_file}"
+    http_read_request_meta "${req_file}" "${meta_file}"
 
-    request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
-    method="$(printf '%s' "${request_line}" | awk '{print $1}')"
-    path="$(printf '%s' "${request_line}" | awk '{print $2}')"
+    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
+    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
 
     case "${method}:${path}" in
         GET:/healthz|GET:/readyz)
-            if "${0}" --output json health > "${response_body}" 2>/dev/null; then
+            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
                 status_line="200 OK"
             else
                 printf '{"ok":false}\n' > "${response_body}"
@@ -3655,11 +3756,11 @@ phpctl_serve_handle_connection() {
             fi
             ;;
         GET:/status)
-            "${0}" --output json status > "${response_body}"
+            "${SELF_PATH}" --output json status > "${response_body}"
             status_line="200 OK"
             ;;
         GET:/metrics)
-            "${0}" --output text metrics > "${response_body}"
+            "${SELF_PATH}" --output text metrics > "${response_body}"
             status_line="200 OK"
             content_type="text/plain; version=0.0.4"
             ;;
@@ -3671,7 +3772,7 @@ phpctl_serve_handle_connection() {
 
     phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
 
-    rm -f "${req_file}" "${response_body}"
+    rm -f "${req_file}" "${response_body}" "${meta_file}"
 }
 
 # Handle one full HTTP connection on stdin/stdout, including POST /run.
@@ -3680,31 +3781,22 @@ phpctl_server_handle_connection() {
     body_file="$(mktemp_file)"
     response_body="$(mktemp_file)"
     result_file="$(mktemp_file)"
+    meta_file="$(mktemp_file)"
     status_line="404 Not Found"
     content_type="application/json"
-    content_length="0"
 
     cat > "${req_file}"
+    http_read_request_meta "${req_file}" "${meta_file}"
+    http_extract_body "${req_file}" "${body_file}"
 
-    request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
-    method="$(printf '%s' "${request_line}" | awk '{print $1}')"
-    path="$(printf '%s' "${request_line}" | awk '{print $2}')"
-
-    while IFS= read -r header_line; do
-        header_line="$(printf '%s' "${header_line}" | tr -d '\r')"
-        [ -n "${header_line}" ] || break
-        case "${header_line}" in
-            [Cc]ontent-[Ll]ength:*)
-                content_length="$(printf '%s' "${header_line#*:}" | tr -d '[:space:]')"
-                ;;
-        esac
-    done < "${req_file}"
-
-    awk 'BEGIN { body=0 } body { print } /^\r?$/ { body=1 }' "${req_file}" > "${body_file}"
+    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
+    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
+    content_length="$(sed -n 's/^content_length=//p' "${meta_file}" | head -n1)"
+    [ -n "${content_length}" ] || content_length="0"
 
     case "${method}:${path}" in
         GET:/healthz|GET:/readyz)
-            if "${0}" --output json health > "${response_body}" 2>/dev/null; then
+            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
                 status_line="200 OK"
             else
                 printf '{"ok":false}\n' > "${response_body}"
@@ -3712,16 +3804,16 @@ phpctl_server_handle_connection() {
             fi
             ;;
         GET:/status)
-            "${0}" --output json status > "${response_body}"
+            "${SELF_PATH}" --output json status > "${response_body}"
             status_line="200 OK"
             ;;
         GET:/metrics)
-            "${0}" --output text metrics > "${response_body}"
+            "${SELF_PATH}" --output text metrics > "${response_body}"
             status_line="200 OK"
             content_type="text/plain; version=0.0.4"
             ;;
         POST:/run)
-            if [ "${content_length:-0}" -gt 0 ] 2>/dev/null; then
+            if [ "${content_length}" -gt 0 ] 2>/dev/null; then
                 phpctl_server_run_payload "${body_file}" "${result_file}"
                 cat "${result_file}" > "${response_body}"
                 status_line="200 OK"
@@ -3738,50 +3830,41 @@ phpctl_server_handle_connection() {
 
     phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
 
-    rm -f "${req_file}" "${body_file}" "${response_body}" "${result_file}"
+    rm -f "${req_file}" "${body_file}" "${response_body}" "${result_file}" "${meta_file}"
 }
 
-# Serve one connection using nc over TCP or Unix socket.
-phpctl_run_listener_once() {
+phpctl_stdio_entrypoint_usage() {
+    cat <<EOF
+Internal command.
+EOF
+}
+
+# Start server using nc -e, which is the only reliable BusyBox-friendly mode.
+phpctl_run_listener_forever() {
     listen="$1"
     mode="$2"
 
-    in_fifo="$(mktemp_file)"
-    out_fifo="$(mktemp_file)"
-    rm -f "${in_fifo}" "${out_fifo}"
-    mkfifo "${in_fifo}" "${out_fifo}"
+    cmd_exists "${NC_BIN}" || die "nc binary not found"
+    nc_supports_exec || die "Current nc implementation does not support exec mode (-e). BusyBox nc with -e is required for the built-in server."
 
     case "${listen}" in
         /*)
+            nc_supports_unix_sockets || die "Current nc implementation does not support Unix sockets (-U missing)"
             rm -f "${listen}"
-            "${NC_BIN}" -l -U "${listen}" < "${out_fifo}" > "${in_fifo}" 2>/dev/null &
+            while :; do
+                "${NC_BIN}" -l -U "${listen}" -e "${SELF_PATH}" "__${mode}_stdio"
+            done
             ;;
         *)
             listen_host="${listen%:*}"
             listen_port="${listen##*:}"
-            [ -n "${listen_host}" ] || { rm -f "${in_fifo}" "${out_fifo}"; die "Invalid listen value: ${listen}"; }
-            [ -n "${listen_port}" ] || { rm -f "${in_fifo}" "${out_fifo}"; die "Invalid listen value: ${listen}"; }
-            "${NC_BIN}" -l -p "${listen_port}" < "${out_fifo}" > "${in_fifo}" 2>/dev/null &
+            [ -n "${listen_host}" ] || die "Invalid listen value: ${listen}"
+            [ -n "${listen_port}" ] || die "Invalid listen value: ${listen}"
+            while :; do
+                "${NC_BIN}" -l -p "${listen_port}" -s "${listen_host}" -e "${SELF_PATH}" "__${mode}_stdio"
+            done
             ;;
     esac
-    nc_pid="$!"
-
-    case "${mode}" in
-        serve)
-            phpctl_serve_handle_connection < "${in_fifo}" > "${out_fifo}" || true
-            ;;
-        server)
-            phpctl_server_handle_connection < "${in_fifo}" > "${out_fifo}" || true
-            ;;
-        *)
-            wait "${nc_pid}" 2>/dev/null || true
-            rm -f "${in_fifo}" "${out_fifo}"
-            die "Unknown listener mode: ${mode}"
-            ;;
-    esac
-
-    wait "${nc_pid}" 2>/dev/null || true
-    rm -f "${in_fifo}" "${out_fifo}"
 }
 
 phpctl_server_run() {
@@ -3805,7 +3888,6 @@ phpctl_server_run() {
         esac
     done
 
-    cmd_exists "${NC_BIN}" || die "nc binary not found"
     phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
 
     case "${OUTPUT_FORMAT}" in
@@ -3816,7 +3898,7 @@ phpctl_server_run() {
             emit_object <<EOF
 listen=${listen}
 mode=server
-transport=nc
+transport=nc-exec
 EOF
             ;;
         *)
@@ -3824,9 +3906,7 @@ EOF
             ;;
     esac
 
-    while :; do
-        phpctl_run_listener_once "${listen}" "server"
-    done
+    phpctl_run_listener_forever "${listen}" "server"
 }
 
 serve_http() {
@@ -3850,7 +3930,6 @@ serve_http() {
         esac
     done
 
-    cmd_exists "${NC_BIN}" || die "nc binary not found"
     phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
 
     case "${OUTPUT_FORMAT}" in
@@ -3861,7 +3940,7 @@ serve_http() {
             emit_object <<EOF
 listen=${listen}
 mode=serve
-transport=nc
+transport=nc-exec
 EOF
             ;;
         *)
@@ -3869,10 +3948,22 @@ EOF
             ;;
     esac
 
-    while :; do
-        phpctl_run_listener_once "${listen}" "serve"
-    done
+    phpctl_run_listener_forever "${listen}" "serve"
 }
+
+# Internal stdio entrypoints for nc -e.
+case "${1:-}" in
+    __serve_stdio)
+        shift
+        phpctl_serve_handle_connection
+        exit 0
+        ;;
+    __server_stdio)
+        shift
+        phpctl_server_handle_connection
+        exit 0
+        ;;
+esac
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -3925,8 +4016,6 @@ case "${1:-help}" in
                     cat <<EOF
 Usage:
   ${PROG} version
-
-Show ${PROG} version.
 EOF
                     ;;
                 json|tsv)
@@ -4023,8 +4112,6 @@ EOF
                     cat <<EOF
 Usage:
   ${PROG} self-test
-
-Run a quick operational test of PHP CLI, modules and php-fpm config.
 EOF
                     ;;
                 json|tsv)
