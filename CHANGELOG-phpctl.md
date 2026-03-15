@@ -1,3 +1,7 @@
+## 0.3.3 - 2026-03-15
+
+- release v0.3.3 (547718c) by Rafał Masiarek
+- add automatic release new image with specific version of kubectl (7c53bca) by Rafał Masiarek
 ## 0.3.2 - 2026-03-15
 
 - feat: add phpctl as release (562219a) by Rafał Masiarek
