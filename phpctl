@@ -24,7 +24,7 @@
 set -eu
 
 PROG="${0##*/}"
-VERSION="0.3.3"
+VERSION="0.3.4"
 
 OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
 
@@ -386,15 +386,45 @@ ext_is_known_core() {
 
 ext_detect_type_value() {
     ext="$1"
+
     if ext_is_known_core "${ext}"; then
         printf '%s\n' "core"
         return 0
     fi
+
+    if [ -d "$(ext_core_dir "${ext}")" ]; then
+        printf '%s\n' "core"
+        return 0
+    fi
+
     if cmd_exists "${PECL_BIN}" && "${PECL_BIN}" remote-info "${ext}" >/dev/null 2>&1; then
         printf '%s\n' "pecl"
         return 0
     fi
+
     printf '%s\n' "unknown"
+    return 1
+}
+
+ext_already_present() {
+    ext="$1"
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ext_module_file_exists "${ext}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ext_is_loaded "${ext}"; then
+        return 0
+    fi
+
     return 1
 }
 
@@ -466,7 +496,7 @@ ext_write_ini() {
     printf '%s\n' "${ini_path}"
 }
 
-# Prepare PHP source tree in the same way as the official helper.
+# Prepare PHP source tree using the official helper from docker-library/php.
 php_source_prepare() {
     src_exists=""
     if [ -d "${PHP_SRC_DIR}" ]; then
@@ -481,7 +511,7 @@ php_source_prepare() {
     fi
 }
 
-# Clean PHP source tree only if phpctl extracted it for this run.
+# Delete extracted PHP sources only if phpctl extracted them for this run.
 php_source_cleanup() {
     if [ -e "${PHP_SRC_DIR}/.docker-delete-me" ]; then
         cmd_exists docker-php-source || die "docker-php-source command not found"
@@ -492,25 +522,34 @@ php_source_cleanup() {
 ext_detect() {
     [ $# -eq 1 ] || die "Usage: ${PROG} ext detect <ext>"
     ext="$1"
+
     detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
     buildable="no"
     installable="no"
+
     case "${detected}" in
         core|pecl)
             installable="yes"
             ;;
     esac
+
     [ "${detected}" = "core" ] && buildable="yes"
+
     emit_object <<EOF
 name=${ext}
 type=${detected}
 buildable=${buildable}
 installable=${installable}
 core_dir=$(ext_core_dir "${ext}")
+known_core=$(ext_is_known_core "${ext}" && printf yes || printf no)
+source_present=$( [ -d "$(ext_core_dir "${ext}")" ] && printf yes || printf no )
+already_present=$(ext_already_present "${ext}" && printf yes || printf no)
+loaded=$(ext_is_loaded "${ext}" && printf yes || printf no)
+module_file_exists=$(ext_module_file_exists "${ext}" && printf yes || printf no)
 EOF
 }
 
-# Build and install a core extension from PHP sources.
+# Build and install one core extension from the PHP source tree.
 ext_install_core() {
     ext="$1"
     jobs="$2"
@@ -595,7 +634,7 @@ ext_install_core() {
     fi
 }
 
-# Install an extension from PECL.
+# Install one extension from PECL.
 ext_install_pecl() {
     ext="$1"
     version="$2"
@@ -829,14 +868,50 @@ show_doctor() {
     fi
     printf 'php_fpm_test\t%s\t%s\n' "${fpm_test_status}" "${fpm_test_details}" >> "${tmp}"
 
-    if [ -d "${PHP_SRC_DIR}" ]; then
+    if [ -d "${PHP_SRC_DIR}" ] || [ -f /usr/src/php.tar.xz ]; then
         src_status="ok"
         src_details="${PHP_SRC_DIR}"
     else
         src_status="warn"
-        src_details="missing: ${PHP_SRC_DIR}"
+        src_details="missing: ${PHP_SRC_DIR} and /usr/src/php.tar.xz"
     fi
     printf 'php_src_dir\t%s\t%s\n' "${src_status}" "${src_details}" >> "${tmp}"
+
+    if cmd_exists docker-php-source; then
+        src_cmd_status="ok"
+        src_cmd_details="$(command -v docker-php-source 2>/dev/null || true)"
+    else
+        src_cmd_status="warn"
+        src_cmd_details="docker-php-source not available"
+    fi
+    printf 'docker_php_source\t%s\t%s\n' "${src_cmd_status}" "${src_cmd_details}" >> "${tmp}"
+
+    if cmd_exists "${PHPIZE_BIN}"; then
+        phpize_status="ok"
+        phpize_details="$(command -v "${PHPIZE_BIN}" 2>/dev/null || true)"
+    else
+        phpize_status="warn"
+        phpize_details="phpize not available"
+    fi
+    printf 'phpize\t%s\t%s\n' "${phpize_status}" "${phpize_details}" >> "${tmp}"
+
+    if cmd_exists "${MAKE_BIN}"; then
+        make_status="ok"
+        make_details="$(command -v "${MAKE_BIN}" 2>/dev/null || true)"
+    else
+        make_status="warn"
+        make_details="make not available"
+    fi
+    printf 'make\t%s\t%s\n' "${make_status}" "${make_details}" >> "${tmp}"
+
+    if cmd_exists "${PECL_BIN}"; then
+        pecl_status="ok"
+        pecl_details="$(command -v "${PECL_BIN}" 2>/dev/null || true)"
+    else
+        pecl_status="warn"
+        pecl_details="pecl not available"
+    fi
+    printf 'pecl\t%s\t%s\n' "${pecl_status}" "${pecl_details}" >> "${tmp}"
 
     render_table_file "${tmp}"
     rm -f "${tmp}"
@@ -1247,6 +1322,8 @@ type=$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)
 available_ini=${available_ini}
 active_ini=${active_ini}
 extension_dir=$(php_extension_dir)
+known_core=$(ext_is_known_core "${ext}" && printf yes || printf no)
+module_file_exists=$(ext_module_file_exists "${ext}" && printf yes || printf no)
 EOF
 }
 
@@ -1371,6 +1448,42 @@ ext_doctor() {
     fi
     printf 'php_src_dir\t%s\t%s\n' "${s4}" "${d4}" >> "${tmp}"
 
+    if cmd_exists docker-php-source; then
+        s5="ok"
+        d5="$(command -v docker-php-source 2>/dev/null || true)"
+    else
+        s5="warn"
+        d5="docker-php-source not available"
+    fi
+    printf 'docker_php_source\t%s\t%s\n' "${s5}" "${d5}" >> "${tmp}"
+
+    if cmd_exists "${PHPIZE_BIN}"; then
+        s6="ok"
+        d6="$(command -v "${PHPIZE_BIN}" 2>/dev/null || true)"
+    else
+        s6="warn"
+        d6="phpize not available"
+    fi
+    printf 'phpize\t%s\t%s\n' "${s6}" "${d6}" >> "${tmp}"
+
+    if cmd_exists "${MAKE_BIN}"; then
+        s7="ok"
+        d7="$(command -v "${MAKE_BIN}" 2>/dev/null || true)"
+    else
+        s7="warn"
+        d7="make not available"
+    fi
+    printf 'make\t%s\t%s\n' "${s7}" "${d7}" >> "${tmp}"
+
+    if cmd_exists "${PECL_BIN}"; then
+        s8="ok"
+        d8="$(command -v "${PECL_BIN}" 2>/dev/null || true)"
+    else
+        s8="warn"
+        d8="pecl not available"
+    fi
+    printf 'pecl\t%s\t%s\n' "${s8}" "${d8}" >> "${tmp}"
+
     loaded_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
     printf 'loaded_extensions\tok\t%s\n' "${loaded_count}" >> "${tmp}"
 
@@ -1409,6 +1522,78 @@ EOF
             die "Unsupported output format: ${OUTPUT_FORMAT}"
             ;;
     esac
+}
+
+ext_emit_install_skip() {
+    ext="$1"
+    type="$2"
+    enable_after="$3"
+    requested_package="$4"
+
+    avail="no"
+    active="no"
+    loaded="no"
+    version="-"
+    available_ini="-"
+    active_ini="-"
+    details="already-installed"
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        avail="yes"
+        available_ini="$(resolve_ext_ini "${ext}")"
+    elif ext_module_file_exists "${ext}"; then
+        avail="yes"
+    elif ext_is_loaded "${ext}"; then
+        avail="yes"
+        details="already-loaded"
+    fi
+
+    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        active="yes"
+        active_ini="$(resolve_ext_active_ini "${ext}")"
+    fi
+
+    if ext_is_loaded "${ext}"; then
+        loaded="yes"
+        version="$(php_ext_version "${ext}")"
+    fi
+
+    if [ "${enable_after}" = "yes" ] && [ "${active}" != "yes" ]; then
+        if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+            mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+            ini_path="$(resolve_ext_ini "${ext}")"
+            ln -sf "${ini_path}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${ini_path}")"
+            active="yes"
+            active_ini="$(resolve_ext_active_ini "${ext}" 2>/dev/null || printf '%s' -)"
+        elif ext_module_file_exists "${ext}"; then
+            available_ini="$(ext_write_ini "${ext}" "${ext}" "")"
+            mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+            ln -sf "${available_ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
+            avail="yes"
+            active="yes"
+            active_ini="${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
+        else
+            details="already-loaded-no-ini"
+        fi
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=install
+extension=${ext}
+type=${type}
+requested_package=${requested_package}
+enabled=${enable_after}
+available=${avail}
+active=${active}
+loaded=${loaded}
+version=${version}
+available_ini=${available_ini}
+active_ini=${active_ini}
+cleanup_performed=no
+skipped=yes
+details=${details}
+EOF
 }
 
 ext_install() {
@@ -1502,18 +1687,17 @@ ext_install() {
         esac
     done
 
-    if [ "${force}" != "yes" ]; then
-        if ext_is_available "${ext}" || resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
-            rm -f "${configure_args_file}"
-            die "Extension already appears installed: ${ext}. Use --force to reinstall."
-        fi
+    requested_package="${ext}"
+    if [ -n "${pecl_version}" ]; then
+        requested_package="${ext}-${pecl_version}"
     fi
 
     if [ "${type}" = "auto" ]; then
         detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
         case "${detected}" in
-            core) type="core" ;;
-            pecl) type="pecl" ;;
+            core|pecl)
+                type="${detected}"
+                ;;
             *)
                 rm -f "${configure_args_file}"
                 die "Unable to detect extension type for: ${ext}"
@@ -1526,12 +1710,15 @@ ext_install() {
         die "--version is only supported for PECL extensions"
     fi
 
+    if [ "${force}" != "yes" ] && ext_already_present "${ext}"; then
+        rm -f "${configure_args_file}"
+        ext_emit_install_skip "${ext}" "${type}" "${enable_after}" "${requested_package}"
+        return 0
+    fi
+
     if [ "${type}" = "pecl" ]; then
         ext_install_pecl "${ext}" "${pecl_version}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }"
-        package="${ext}"
-        if [ -n "${pecl_version}" ]; then
-            package="${ext}-${pecl_version}"
-        fi
+        package="${requested_package}"
     else
         ext_install_core "${ext}" "${jobs}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }" "${configure_args_file}"
         package="${ext}"
@@ -2417,9 +2604,6 @@ fpm_pool_bundle_import() {
     mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}" "${PHP_FPM_POOL_ACTIVE_DIR}"
 
     PHPCTL_JSON_FILE="${input_file}" \
-    PHPCTL_TEMPLATE_DEFAULT="${PHP_FPM_POOL_TEMPLATE}" \
-    PHPCTL_POOL_AVAILABLE_DIR="${PHP_FPM_POOL_AVAILABLE_DIR}" \
-    PHPCTL_POOL_ACTIVE_DIR="${PHP_FPM_POOL_ACTIVE_DIR}" \
     PHPCTL_RESULT_FILE="${result_file}" \
     PHPCTL_SELF_PATH="$0" \
     "${PHP_BIN}" -r '
@@ -3073,7 +3257,7 @@ serve_usage() {
         text)
             cat <<EOF
 Usage:
-  ${PROG} serve [--listen host:port]
+  ${PROG} serve [--listen <socket|host:port>]
 
 Serve /healthz, /readyz, /status and /metrics over HTTP.
 EOF
@@ -3081,7 +3265,7 @@ EOF
         json|tsv)
             emit_object <<EOF
 section=serve
-usage=${PROG} serve [--listen host:port]
+usage=${PROG} serve [--listen <socket|host:port>]
 EOF
             ;;
         *)
@@ -3127,6 +3311,10 @@ Usage:
   ${PROG} server [--listen <socket|host:port>]
 
 Serve /healthz, /readyz, /status, /metrics and POST /run over HTTP.
+
+Notes:
+  - The built-in server does not enforce Basic Auth.
+  - Basic Auth can be added externally, for example with nginx.
 EOF
             ;;
         json|tsv)
@@ -3137,6 +3325,39 @@ EOF
             ;;
         *)
             die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+phpctl_is_unix_socket_endpoint() {
+    case "$1" in
+        /*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+phpctl_validate_endpoint() {
+    endpoint="$1"
+
+    if phpctl_is_unix_socket_endpoint "${endpoint}"; then
+        return 0
+    fi
+
+    case "${endpoint}" in
+        *:*)
+            host_part="${endpoint%:*}"
+            port_part="${endpoint##*:}"
+            [ -n "${host_part}" ] || return 1
+            [ -n "${port_part}" ] || return 1
+            case "${port_part}" in
+                *[!0-9]*)
+                    return 1
+                    ;;
+            esac
+            return 0
+            ;;
+        *)
+            return 1
             ;;
     esac
 }
@@ -3321,6 +3542,7 @@ phpctl_client_run() {
     phpctl_client_load_config "${PHPCTL_CLIENT_CONF}"
 
     [ -n "${PHPCTL_REMOTE_HOST}" ] || die "Remote host is not configured"
+    phpctl_validate_endpoint "${PHPCTL_REMOTE_HOST}" || die "Invalid remote host: ${PHPCTL_REMOTE_HOST}"
 
     payload_file="$(phpctl_client_build_payload "$@")"
     response_file="$(phpctl_client_send_http "${PHPCTL_REMOTE_HOST}" "${PHPCTL_REMOTE_CREDENTIALS}" "${payload_file}")"
@@ -3410,7 +3632,49 @@ phpctl_server_http_response() {
     cat "${body_file}"
 }
 
-# Handle a single HTTP connection on stdin/stdout.
+# Handle one read-only HTTP connection on stdin/stdout.
+phpctl_serve_handle_connection() {
+    req_file="$(mktemp_file)"
+    response_body="$(mktemp_file)"
+    status_line="404 Not Found"
+    content_type="application/json"
+
+    cat > "${req_file}"
+
+    request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
+    method="$(printf '%s' "${request_line}" | awk '{print $1}')"
+    path="$(printf '%s' "${request_line}" | awk '{print $2}')"
+
+    case "${method}:${path}" in
+        GET:/healthz|GET:/readyz)
+            if "${0}" --output json health > "${response_body}" 2>/dev/null; then
+                status_line="200 OK"
+            else
+                printf '{"ok":false}\n' > "${response_body}"
+                status_line="503 Service Unavailable"
+            fi
+            ;;
+        GET:/status)
+            "${0}" --output json status > "${response_body}"
+            status_line="200 OK"
+            ;;
+        GET:/metrics)
+            "${0}" --output text metrics > "${response_body}"
+            status_line="200 OK"
+            content_type="text/plain; version=0.0.4"
+            ;;
+        *)
+            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
+            status_line="404 Not Found"
+            ;;
+    esac
+
+    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
+
+    rm -f "${req_file}" "${response_body}"
+}
+
+# Handle one full HTTP connection on stdin/stdout, including POST /run.
 phpctl_server_handle_connection() {
     req_file="$(mktemp_file)"
     body_file="$(mktemp_file)"
@@ -3478,8 +3742,9 @@ phpctl_server_handle_connection() {
 }
 
 # Serve one connection using nc over TCP or Unix socket.
-phpctl_server_run_listener_once() {
+phpctl_run_listener_once() {
     listen="$1"
+    mode="$2"
 
     in_fifo="$(mktemp_file)"
     out_fifo="$(mktemp_file)"
@@ -3494,13 +3759,26 @@ phpctl_server_run_listener_once() {
         *)
             listen_host="${listen%:*}"
             listen_port="${listen##*:}"
+            [ -n "${listen_host}" ] || { rm -f "${in_fifo}" "${out_fifo}"; die "Invalid listen value: ${listen}"; }
             [ -n "${listen_port}" ] || { rm -f "${in_fifo}" "${out_fifo}"; die "Invalid listen value: ${listen}"; }
             "${NC_BIN}" -l -p "${listen_port}" < "${out_fifo}" > "${in_fifo}" 2>/dev/null &
             ;;
     esac
     nc_pid="$!"
 
-    phpctl_server_handle_connection < "${in_fifo}" > "${out_fifo}" || true
+    case "${mode}" in
+        serve)
+            phpctl_serve_handle_connection < "${in_fifo}" > "${out_fifo}" || true
+            ;;
+        server)
+            phpctl_server_handle_connection < "${in_fifo}" > "${out_fifo}" || true
+            ;;
+        *)
+            wait "${nc_pid}" 2>/dev/null || true
+            rm -f "${in_fifo}" "${out_fifo}"
+            die "Unknown listener mode: ${mode}"
+            ;;
+    esac
 
     wait "${nc_pid}" 2>/dev/null || true
     rm -f "${in_fifo}" "${out_fifo}"
@@ -3528,15 +3806,16 @@ phpctl_server_run() {
     done
 
     cmd_exists "${NC_BIN}" || die "nc binary not found"
+    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
 
     case "${OUTPUT_FORMAT}" in
         text)
-            printf 'server_listen: %s\n' "${listen}"
+            printf 'server_listen: %s\n' "${listen}" >&2
             ;;
         json|tsv)
             emit_object <<EOF
 listen=${listen}
-mode=single-file
+mode=server
 transport=nc
 EOF
             ;;
@@ -3546,7 +3825,7 @@ EOF
     esac
 
     while :; do
-        phpctl_server_run_listener_once "${listen}"
+        phpctl_run_listener_once "${listen}" "server"
     done
 }
 
@@ -3572,15 +3851,16 @@ serve_http() {
     done
 
     cmd_exists "${NC_BIN}" || die "nc binary not found"
+    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
 
     case "${OUTPUT_FORMAT}" in
         text)
-            printf 'serve_listen: %s\n' "${listen}"
+            printf 'serve_listen: %s\n' "${listen}" >&2
             ;;
         json|tsv)
             emit_object <<EOF
 listen=${listen}
-mode=single-file
+mode=serve
 transport=nc
 EOF
             ;;
@@ -3590,7 +3870,7 @@ EOF
     esac
 
     while :; do
-        phpctl_server_run_listener_once "${listen}"
+        phpctl_run_listener_once "${listen}" "serve"
     done
 }
 
