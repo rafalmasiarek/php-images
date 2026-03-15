@@ -1,3 +1,7 @@
+## 0.3.4 - 2026-03-15
+
+- feat: resolve problem with rebuild existing core module (9642809) by Rafał Masiarek
+- chore(images): bump phpctl to 0.3.3 (fd9925b) by github-actions[bot]
 ## 0.3.3 - 2026-03-15
 
 - release v0.3.3 (547718c) by Rafał Masiarek
