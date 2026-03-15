@@ -2,7 +2,7 @@
 FROM php:8.2.30-fpm-alpine3.22 AS builder
 
 ARG PECL_FILE=pecl.txt
-ARG PHPCTL_VERSION=0.3.2
+ARG PHPCTL_VERSION=0.3.3
 
 COPY rootfs/ /
 COPY ${PECL_FILE} /tmp/pecl.txt
@@ -49,7 +49,7 @@ RUN set -eux; \
 
 FROM php:8.2.30-fpm-alpine3.22 AS runtime
 
-ARG PHPCTL_VERSION=0.3.2
+ARG PHPCTL_VERSION=0.3.3
 
 RUN set -eux; \
     apk add --no-cache \
