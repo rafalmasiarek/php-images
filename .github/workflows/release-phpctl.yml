@@ -1,0 +1,332 @@
+name: release-phpctl
+
+on:
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "phpctl release version, for example X.Y.Z"
+                required: true
+                type: string
+
+permissions:
+    contents: write
+    pull-requests: write
+
+concurrency:
+    group: release-phpctl-${{ github.event.inputs.version }}
+    cancel-in-progress: false
+
+jobs:
+    prepare-release-pr:
+        name: Prepare phpctl release PR
+        runs-on: ubuntu-latest
+
+        env:
+            PHPCTL_FILE: phpctl
+            PHPCTL_CHANGELOG_FILE: CHANGELOG-phpctl.md
+            TEST_IMAGE: php:cli-alpine
+            REPO_OWNER: rafalmasiarek
+            REPO_NAME: php-images
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Validate input version and prepare metadata
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  VERSION_INPUT="${{ github.event.inputs.version }}"
+
+                  if [[ ! "${VERSION_INPUT}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]; then
+                    echo "Invalid version format: ${VERSION_INPUT}"
+                    exit 1
+                  fi
+
+                  RELEASE_TAG="phpctl-v${VERSION_INPUT}"
+                  RELEASE_BRANCH="release/phpctl-v${VERSION_INPUT}"
+                  RELEASE_TITLE="release: phpctl v${VERSION_INPUT}"
+
+                  {
+                    echo "VERSION_INPUT=${VERSION_INPUT}"
+                    echo "RELEASE_TAG=${RELEASE_TAG}"
+                    echo "RELEASE_BRANCH=${RELEASE_BRANCH}"
+                    echo "RELEASE_TITLE=${RELEASE_TITLE}"
+                  } >> "${GITHUB_ENV}"
+
+            - name: Ensure required files exist
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  test -f "${PHPCTL_FILE}" || {
+                    echo "Missing ${PHPCTL_FILE}"
+                    exit 1
+                  }
+
+                  if [ ! -f "${PHPCTL_CHANGELOG_FILE}" ]; then
+                    touch "${PHPCTL_CHANGELOG_FILE}"
+                  fi
+
+            - name: Check release does not already exist
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+                    echo "Tag already exists locally: ${RELEASE_TAG}"
+                    exit 1
+                  fi
+
+                  if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+                    echo "Release already exists: ${RELEASE_TAG}"
+                    exit 1
+                  fi
+
+            - name: Detect previous phpctl release tag
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  PREV_TAG="$(git tag --list 'phpctl-v*' --sort=-version:refname | grep -vx "${RELEASE_TAG}" | head -n1 || true)"
+                  echo "PREV_TAG=${PREV_TAG}" >> "${GITHUB_ENV}"
+
+                  if [ -n "${PREV_TAG}" ]; then
+                    echo "Previous release tag: ${PREV_TAG}"
+                  else
+                    echo "Previous release tag: <none>"
+                  fi
+
+            - name: Update phpctl version
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  if grep -q '^VERSION="' "${PHPCTL_FILE}"; then
+                    sed -i -E 's/^VERSION="[^"]*"/VERSION="'"${VERSION_INPUT}"'"/' "${PHPCTL_FILE}"
+                  else
+                    echo "Unable to find VERSION assignment in ${PHPCTL_FILE}"
+                    exit 1
+                  fi
+
+                  echo "Updated VERSION in ${PHPCTL_FILE}:"
+                  grep '^VERSION="' "${PHPCTL_FILE}"
+
+            - name: Generate changelog entry
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  TODAY="$(date -u +%F)"
+                  TMP_ENTRY="$(mktemp)"
+                  TMP_LOG="$(mktemp)"
+
+                  if [ -n "${PREV_TAG}" ]; then
+                    git log --no-merges --pretty=format:'- %s (%h) by %an' "${PREV_TAG}..HEAD" > "${TMP_LOG}"
+                  else
+                    git log --no-merges --pretty=format:'- %s (%h) by %an' > "${TMP_LOG}"
+                  fi
+
+                  if [ ! -s "${TMP_LOG}" ]; then
+                    echo "- No code changes recorded since previous phpctl release" > "${TMP_LOG}"
+                  fi
+
+                  perl -pe 's{(?<!\[)#(\d+)}{[#$1](https://github.com/rafalmasiarek/php-images/issues/$1)}g; s{(?<!\[)@([A-Za-z0-9_-]+)}{[@$1](https://github.com/$1)}g' "${TMP_LOG}" > "${TMP_LOG}.linked"
+
+                  {
+                    echo "## ${VERSION_INPUT} - ${TODAY}"
+                    echo
+                    cat "${TMP_LOG}.linked"
+                    echo
+                  } > "${TMP_ENTRY}"
+
+                  if [ -s "${PHPCTL_CHANGELOG_FILE}" ]; then
+                    cat "${TMP_ENTRY}" "${PHPCTL_CHANGELOG_FILE}" > "${PHPCTL_CHANGELOG_FILE}.new"
+                    mv "${PHPCTL_CHANGELOG_FILE}.new" "${PHPCTL_CHANGELOG_FILE}"
+                  else
+                    cp "${TMP_ENTRY}" "${PHPCTL_CHANGELOG_FILE}"
+                  fi
+
+                  {
+                    echo 'CHANGELOG_BODY<<EOF'
+                    cat "${TMP_ENTRY}"
+                    echo 'EOF'
+                  } >> "${GITHUB_ENV}"
+
+                  echo "Generated changelog entry:"
+                  cat "${TMP_ENTRY}"
+
+            - name: Show resulting changelog head
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  echo "Top of ${PHPCTL_CHANGELOG_FILE}:"
+                  sed -n '1,40p' "${PHPCTL_CHANGELOG_FILE}"
+
+            - name: Make phpctl executable
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  chmod +x "${PHPCTL_FILE}"
+
+            - name: Pull smoke test image
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker pull "${TEST_IMAGE}"
+
+            - name: Smoke test 1 - version matches requested release version
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+                      VERSION_OUTPUT="$(./phpctl version)"
+                      echo "phpctl version output: ${VERSION_OUTPUT}"
+                      case "${VERSION_OUTPUT}" in
+                        *"v'"${VERSION_INPUT}"'"*) ;;
+                        *)
+                          echo "phpctl version output does not match expected release version"
+                          exit 1
+                          ;;
+                      esac
+                    '
+
+            - name: Smoke test 2 - help and output formats
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      ./phpctl help >/tmp/phpctl-help.txt
+                      ./phpctl ext --help >/tmp/phpctl-ext-help.txt
+                      ./phpctl fpm --help >/tmp/phpctl-fpm-help.txt
+                      ./phpctl ini --help >/tmp/phpctl-ini-help.txt
+                      ./phpctl --output json version >/tmp/phpctl-version.json
+                      ./phpctl --output tsv version >/tmp/phpctl-version.tsv
+
+                      echo "--- phpctl help ---"
+                      head -n 20 /tmp/phpctl-help.txt || true
+                      echo "--- phpctl version json ---"
+                      cat /tmp/phpctl-version.json
+                      echo "--- phpctl version tsv ---"
+                      cat /tmp/phpctl-version.tsv
+                    '
+
+            - name: Smoke test 3 - pool rendering and generation
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      ./phpctl fpm pool render smoke \
+                        -p ENABLE_METRICS=true \
+                        -p STATUS_PATH=/fpm-status-smoke \
+                        > /tmp/rendered-pool.conf
+
+                      ./phpctl fpm pool generate smoke \
+                        --output-file /tmp/generated-pool.conf \
+                        -p ENABLE_METRICS=true \
+                        -p STATUS_PATH=/fpm-status-smoke
+
+                      echo "--- rendered pool ---"
+                      cat /tmp/rendered-pool.conf
+                      echo "--- generated pool ---"
+                      cat /tmp/generated-pool.conf
+
+                      grep -q "pm.status_path = /fpm-status-smoke" /tmp/generated-pool.conf
+                    '
+
+            - name: Smoke test 4 - extension detection
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      echo "--- detect gd ---"
+                      ./phpctl ext detect gd || true
+
+                      echo "--- detect redis ---"
+                      ./phpctl ext detect redis || true
+                    '
+
+            - name: Commit changes and create branch
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+                    echo "Remote branch already exists: ${RELEASE_BRANCH}"
+                    exit 1
+                  fi
+
+                  git checkout -b "${RELEASE_BRANCH}"
+                  git add "${PHPCTL_FILE}" "${PHPCTL_CHANGELOG_FILE}"
+
+                  if git diff --cached --quiet; then
+                    echo "No changes to commit"
+                    exit 1
+                  fi
+
+                  git commit -m "${RELEASE_TITLE}"
+                  git push --set-upstream origin "${RELEASE_BRANCH}"
+
+            - name: Create release PR
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  EXISTING_PR_NUMBER="$(gh pr list \
+                    --head "${RELEASE_BRANCH}" \
+                    --base main \
+                    --state open \
+                    --json number \
+                    --jq '.[0].number // empty')"
+
+                  if [ -n "${EXISTING_PR_NUMBER}" ]; then
+                    echo "PR already exists: #${EXISTING_PR_NUMBER}"
+                    exit 0
+                  fi
+
+                  gh pr create \
+                    --base main \
+                    --head "${RELEASE_BRANCH}" \
+                    --title "${RELEASE_TITLE}" \
+                    --body "${CHANGELOG_BODY}"

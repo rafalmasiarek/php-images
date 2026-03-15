@@ -1,0 +1,3103 @@
+#!/bin/sh
+set -eu
+
+PROG="${0##*/}"
+VERSION="0.3.1"
+
+OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
+
+PHP_BIN="${PHPCTL_PHP_BIN:-${PHP_BIN:-php}}"
+PHP_FPM_BIN="${PHPCTL_PHP_FPM_BIN:-${PHP_FPM_BIN:-php-fpm}}"
+PECL_BIN="${PHPCTL_PECL_BIN:-${PECL_BIN:-pecl}}"
+PHPIZE_BIN="${PHPCTL_PHPIZE_BIN:-${PHPIZE_BIN:-phpize}}"
+MAKE_BIN="${PHPCTL_MAKE_BIN:-${MAKE_BIN:-make}}"
+READ_ELF_BIN="${PHPCTL_READ_ELF_BIN:-${READ_ELF_BIN:-readelf}}"
+NC_BIN="${PHPCTL_NC_BIN:-${NC_BIN:-nc}}"
+
+PHP_INI_DIR="${PHPCTL_PHP_INI_DIR:-${PHP_INI_DIR:-/usr/local/etc/php}}"
+PHP_EXT_AVAILABLE_DIR="${PHPCTL_PHP_EXT_AVAILABLE_DIR:-${PHP_EXT_AVAILABLE_DIR:-${PHP_INI_DIR}/conf.d/available}}"
+PHP_EXT_ACTIVE_DIR="${PHPCTL_PHP_EXT_ACTIVE_DIR:-${PHP_EXT_ACTIVE_DIR:-${PHP_INI_DIR}/conf.d}}"
+
+PHP_FPM_CONF_DIR="${PHPCTL_PHP_FPM_CONF_DIR:-${PHP_FPM_CONF_DIR:-/usr/local/etc}}"
+PHP_FPM_POOL_AVAILABLE_DIR="${PHPCTL_PHP_FPM_POOL_AVAILABLE_DIR:-${PHP_FPM_POOL_AVAILABLE_DIR:-${PHP_FPM_CONF_DIR}/php-fpm.d/available}}"
+PHP_FPM_POOL_ACTIVE_DIR="${PHPCTL_PHP_FPM_POOL_ACTIVE_DIR:-${PHP_FPM_POOL_ACTIVE_DIR:-${PHP_FPM_CONF_DIR}/php-fpm.d}}"
+PHP_FPM_POOL_TEMPLATE="${PHPCTL_PHP_FPM_POOL_TEMPLATE:-${PHP_FPM_POOL_TEMPLATE:-}}"
+PHP_FPM_RELOAD_SIGNAL="${PHPCTL_PHP_FPM_RELOAD_SIGNAL:-${PHP_FPM_RELOAD_SIGNAL:-HUP}}"
+
+PHP_SRC_DIR="${PHPCTL_PHP_SRC_DIR:-${PHP_SRC_DIR:-/usr/src/php}}"
+PHP_BUILD_DEPS_VIRTUAL="${PHPCTL_PHP_BUILD_DEPS_VIRTUAL:-.phpctl-php-ext-build}"
+PHP_BUILD_DEPS="${PHPCTL_PHP_BUILD_DEPS:-${PHP_BUILD_DEPS:-${PHPIZE_DEPS:-autoconf dpkg-dev dpkg file g++ gcc libc-dev make pkgconf re2c} linux-headers pkgconfig re2c git binutils}}"
+
+PHPCTL_SERVE_LISTEN="${PHPCTL_SERVE_LISTEN:-0.0.0.0:8080}"
+
+cmd_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+mktemp_file() {
+    mktemp "${TMPDIR:-/tmp}/phpctl.XXXXXX"
+}
+
+json_quote() {
+    "${PHP_BIN}" -r 'echo json_encode($argv[1], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' "$1"
+}
+
+die() {
+    msg="$*"
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'ERROR: %s\n' "${msg}" >&2
+            ;;
+        json)
+            printf '{"ok":false,"error":%s}\n' "$(json_quote "${msg}")" >&2
+            ;;
+        tsv)
+            printf 'ok\terror\nno\t%s\n' "${msg}" >&2
+            ;;
+        *)
+            printf 'ERROR: %s\n' "${msg}" >&2
+            ;;
+    esac
+    exit 1
+}
+
+php_ini_scan_dir() {
+    "${PHP_BIN}" --ini 2>/dev/null | sed -n 's|^Scan for additional .ini files in: ||p' | head -n1
+}
+
+php_loaded_ini() {
+    "${PHP_BIN}" --ini 2>/dev/null | sed -n 's|^Loaded Configuration File: *||p' | head -n1
+}
+
+php_extension_dir() {
+    "${PHP_BIN}" -r 'echo ini_get("extension_dir"), PHP_EOL;' 2>/dev/null || true
+}
+
+php_loaded_extensions_list() {
+    "${PHP_BIN}" -r '
+        $a = get_loaded_extensions();
+        $b = function_exists("get_loaded_extensions") ? get_loaded_extensions(true) : [];
+        $exts = array_values(array_unique(array_merge($a, $b)));
+        sort($exts, SORT_NATURAL | SORT_FLAG_CASE);
+        foreach ($exts as $e) {
+            echo $e, PHP_EOL;
+        }
+    ' 2>/dev/null || true
+}
+
+php_ext_version() {
+    ext="$1"
+    if ext_is_loaded "${ext}"; then
+        "${PHP_BIN}" -r '
+            $v = phpversion($argv[1]);
+            if ($v === false || $v === null || $v === "") {
+                $v = "(built-in/unknown)";
+            }
+            echo $v, PHP_EOL;
+        ' "${ext}" 2>/dev/null || printf '%s\n' "-"
+    else
+        printf '%s\n' "-"
+    fi
+}
+
+php_parsed_ini_files() {
+    "${PHP_BIN}" --ini 2>/dev/null | awk '
+        BEGIN { capture=0 }
+        /^Additional .ini files parsed:/ { capture=1; next }
+        capture == 1 {
+            line=$0
+            sub(/^[[:space:]]+/, "", line)
+            sub(/[[:space:]]+$/, "", line)
+            if (line == "(none)") next
+            if (line != "") print line
+        }
+    ' || true
+}
+
+emit_object() {
+    tmp="$(mktemp_file)"
+    cat > "${tmp}"
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            while IFS='=' read -r k v; do
+                [ -n "${k}" ] || continue
+                printf '%-20s %s\n' "${k}:" "${v}"
+            done < "${tmp}"
+            ;;
+        json)
+            TMP_OBJECT_FILE="${tmp}" "${PHP_BIN}" -r '
+                $file = getenv("TMP_OBJECT_FILE");
+                $out = [];
+                foreach (file($file, FILE_IGNORE_NEW_LINES) as $line) {
+                    if ($line === "") {
+                        continue;
+                    }
+                    $parts = explode("=", $line, 2);
+                    $key = $parts[0];
+                    $value = isset($parts[1]) ? $parts[1] : "";
+                    if ($value === "yes") {
+                        $out[$key] = true;
+                    } elseif ($value === "no") {
+                        $out[$key] = false;
+                    } else {
+                        $out[$key] = $value;
+                    }
+                }
+                echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PHP_EOL;
+            '
+            ;;
+        tsv)
+            awk -F '=' '
+                BEGIN { first=1 }
+                {
+                    if (!first) printf "\t";
+                    printf "%s", $1;
+                    first=0;
+                    vals[NR]=substr($0, length($1) + 2);
+                    n=NR;
+                }
+                END {
+                    printf "\n";
+                    for (i=1; i<=n; i++) {
+                        if (i>1) printf "\t";
+                        printf "%s", vals[i];
+                    }
+                    printf "\n";
+                }
+            ' "${tmp}"
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    rm -f "${tmp}"
+}
+
+pretty_print_tsv() {
+    file="$1"
+    awk -F '\t' '
+        {
+            rows[NR]=$0
+            for (i=1; i<=NF; i++) {
+                if (length($i) > w[i]) {
+                    w[i] = length($i)
+                }
+            }
+            if (NF > nf) {
+                nf = NF
+            }
+            nr = NR
+        }
+        END {
+            for (r=1; r<=nr; r++) {
+                split(rows[r], f, FS)
+                for (i=1; i<=nf; i++) {
+                    val = f[i]
+                    if (i < nf) {
+                        printf "%-*s", w[i] + 2, val
+                    } else {
+                        printf "%s", val
+                    }
+                }
+                printf "\n"
+            }
+        }
+    ' "${file}"
+}
+
+tsv_file_to_json() {
+    file="$1"
+    TSV_JSON_FILE="${file}" "${PHP_BIN}" -r '
+        $file = getenv("TSV_JSON_FILE");
+        $lines = file($file, FILE_IGNORE_NEW_LINES);
+        if (!$lines || count($lines) === 0) {
+            echo "[]\n";
+            exit(0);
+        }
+        $header = explode("\t", array_shift($lines));
+        $rows = [];
+        foreach ($lines as $line) {
+            if ($line === "") {
+                continue;
+            }
+            $cols = explode("\t", $line);
+            $row = [];
+            foreach ($header as $i => $key) {
+                $value = array_key_exists($i, $cols) ? $cols[$i] : "";
+                if ($value === "yes") {
+                    $row[$key] = true;
+                } elseif ($value === "no") {
+                    $row[$key] = false;
+                } else {
+                    $row[$key] = $value;
+                }
+            }
+            $rows[] = $row;
+        }
+        echo json_encode($rows, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PHP_EOL;
+    '
+}
+
+render_table_file() {
+    file="$1"
+    case "${OUTPUT_FORMAT}" in
+        text)
+            pretty_print_tsv "${file}"
+            ;;
+        json)
+            tsv_file_to_json "${file}"
+            ;;
+        tsv)
+            cat "${file}"
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+apk_add_if_any() {
+    if [ $# -gt 0 ] && [ -n "$*" ]; then
+        apk add --no-cache "$@"
+    fi
+}
+
+php_build_deps_install() {
+    if apk info --installed "${PHP_BUILD_DEPS_VIRTUAL}" >/dev/null 2>&1; then
+        return 0
+    fi
+    apk add --no-cache --virtual "${PHP_BUILD_DEPS_VIRTUAL}" ${PHP_BUILD_DEPS}
+}
+
+php_build_deps_cleanup() {
+    apk del "${PHP_BUILD_DEPS_VIRTUAL}" >/dev/null 2>&1 || true
+}
+
+php_fpm_master_pid() {
+    if cmd_exists pidof; then
+        pidof "$(basename "${PHP_FPM_BIN}")" 2>/dev/null | awk '{print $1}' | head -n1
+        return 0
+    fi
+    ps 2>/dev/null | awk '/php-fpm: master process/ { print $1; exit }'
+}
+
+resolve_ext_ini() {
+    ext="$1"
+
+    for candidate in \
+        "${PHP_EXT_AVAILABLE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_AVAILABLE_DIR}/${ext}.ini" \
+        "${PHP_EXT_AVAILABLE_DIR}/zz-${ext}.ini"
+    do
+        [ -f "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+
+    return 1
+}
+
+resolve_ext_active_ini() {
+    ext="$1"
+
+    for candidate in \
+        "${PHP_EXT_ACTIVE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/zz-${ext}.ini"
+    do
+        [ -e "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+
+    return 1
+}
+
+ext_name_from_ini() {
+    base="$(basename "$1")"
+    name="${base#docker-php-ext-}"
+    name="${name#zz-}"
+    name="${name%.ini}"
+    printf '%s\n' "${name}"
+}
+
+ext_is_loaded() {
+    ext="$1"
+    php_loaded_extensions_list | grep -Fxi "${ext}" >/dev/null 2>&1
+}
+
+ext_module_file_exists() {
+    ext="$1"
+    extdir="$(php_extension_dir)"
+    [ -n "${extdir}" ] && [ -f "${extdir}/${ext}.so" ]
+}
+
+ext_is_available() {
+    ext="$1"
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        return 0
+    fi
+    if ext_module_file_exists "${ext}"; then
+        return 0
+    fi
+    return 1
+}
+
+ext_core_dir() {
+    printf '%s\n' "${PHP_SRC_DIR}/ext/$1"
+}
+
+ext_is_known_core() {
+    case "$1" in
+        bcmath|bz2|calendar|ctype|curl|dba|dom|enchant|exif|ffi|fileinfo|ftp|gd|gettext|gmp|iconv|imap|intl|ldap|mbstring|mysqli|opcache|pcntl|pdo|pdo_mysql|pdo_pgsql|pdo_sqlite|pgsql|phar|posix|shmop|simplexml|snmp|soap|sockets|sodium|sysvmsg|sysvsem|sysvshm|tokenizer|xml|xmlreader|xmlwriter|xsl|zip)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ext_detect_type_value() {
+    ext="$1"
+    if [ -d "$(ext_core_dir "${ext}")" ]; then
+        printf '%s\n' "core"
+        return 0
+    fi
+    if cmd_exists "${PECL_BIN}" && "${PECL_BIN}" remote-info "${ext}" >/dev/null 2>&1; then
+        printf '%s\n' "pecl"
+        return 0
+    fi
+    if ext_is_known_core "${ext}"; then
+        printf '%s\n' "core-known-but-source-missing"
+        return 0
+    fi
+    printf '%s\n' "unknown"
+    return 1
+}
+
+collect_ext_row() {
+    ext="$1"
+
+    avail="no"
+    active="no"
+    loaded="no"
+    version="-"
+    available_ini="-"
+    active_ini="-"
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        avail="yes"
+        available_ini="$(resolve_ext_ini "${ext}")"
+    elif ext_module_file_exists "${ext}"; then
+        avail="yes"
+    fi
+
+    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        active="yes"
+        active_ini="$(resolve_ext_active_ini "${ext}")"
+    fi
+
+    if ext_is_loaded "${ext}"; then
+        loaded="yes"
+        version="$(php_ext_version "${ext}")"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${ext}" "${avail}" "${active}" "${loaded}" "${version}" "$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)" "${available_ini}" "${active_ini}"
+}
+
+ext_ini_basename() {
+    ext="$1"
+    ini_name="$2"
+    if [ -n "${ini_name}" ]; then
+        case "${ini_name}" in
+            *.ini) printf '%s\n' "${ini_name}" ;;
+            *) printf '%s.ini\n' "${ini_name}" ;;
+        esac
+    else
+        printf 'docker-php-ext-%s.ini\n' "${ext}"
+    fi
+}
+
+ext_is_zend_extension() {
+    module_path="$1"
+    if cmd_exists "${READ_ELF_BIN}"; then
+        "${READ_ELF_BIN}" --wide --syms "${module_path}" 2>/dev/null | grep -q ' zend_extension_entry$'
+        return $?
+    fi
+    return 1
+}
+
+ext_write_ini() {
+    ext="$1"
+    module_name="$2"
+    ini_name="$3"
+    mkdir -p "${PHP_EXT_AVAILABLE_DIR}"
+    ini_path="${PHP_EXT_AVAILABLE_DIR}/$(ext_ini_basename "${ext}" "${ini_name}")"
+    if ext_is_zend_extension "$(php_extension_dir)/${module_name}.so"; then
+        line="zend_extension=${module_name}"
+    else
+        line="extension=${module_name}"
+    fi
+    printf '%s\n' "${line}" > "${ini_path}"
+    printf '%s\n' "${ini_path}"
+}
+
+ext_detect() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext detect <ext>"
+    ext="$1"
+    detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
+    buildable="no"
+    installable="no"
+    case "${detected}" in
+        core)
+            buildable="yes"
+            installable="yes"
+            ;;
+        pecl)
+            installable="yes"
+            ;;
+    esac
+    emit_object <<EOF
+name=${ext}
+type=${detected}
+buildable=${buildable}
+installable=${installable}
+core_dir=$(ext_core_dir "${ext}")
+EOF
+}
+
+ext_install_core() {
+    ext="$1"
+    jobs="$2"
+    enable_after="$3"
+    no_cleanup="$4"
+    ini_name="$5"
+    apk_deps="$6"
+    runtime_pkgs="$7"
+    configure_args_file="$8"
+
+    core_dir="$(ext_core_dir "${ext}")"
+    [ -d "${core_dir}" ] || die "Core extension source directory not found: ${core_dir}"
+
+    if [ -n "${runtime_pkgs}" ]; then
+        apk_add_if_any ${runtime_pkgs}
+    fi
+
+    php_build_deps_install
+
+    if [ -n "${apk_deps}" ]; then
+        apk_add_if_any ${apk_deps}
+    fi
+
+    oldpwd="$(pwd)"
+    cd "${core_dir}"
+
+    if [ ! -f configure ]; then
+        "${PHPIZE_BIN}"
+    fi
+
+    if [ -s "${configure_args_file}" ]; then
+        set --
+        while IFS= read -r arg; do
+            [ -n "${arg}" ] || continue
+            set -- "$@" "${arg}"
+        done < "${configure_args_file}"
+        ./configure "$@"
+    else
+        ./configure
+    fi
+
+    "${MAKE_BIN}" -j"${jobs}"
+    "${MAKE_BIN}" install
+    "${MAKE_BIN}" clean >/dev/null 2>&1 || true
+
+    cd "${oldpwd}"
+
+    [ -f "$(php_extension_dir)/${ext}.so" ] || die "Installed module file not found for: ${ext}"
+
+    available_ini="$(ext_write_ini "${ext}" "${ext}" "${ini_name}")"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+        ln -sf "${available_ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
+    fi
+
+    if [ "${no_cleanup}" != "yes" ]; then
+        php_build_deps_cleanup
+    fi
+}
+
+ext_install_pecl() {
+    ext="$1"
+    version="$2"
+    enable_after="$3"
+    no_cleanup="$4"
+    ini_name="$5"
+    apk_deps="$6"
+    runtime_pkgs="$7"
+
+    cmd_exists "${PECL_BIN}" || die "pecl binary not found"
+
+    if [ -n "${runtime_pkgs}" ]; then
+        apk_add_if_any ${runtime_pkgs}
+    fi
+
+    php_build_deps_install
+
+    if [ -n "${apk_deps}" ]; then
+        apk_add_if_any ${apk_deps}
+    fi
+
+    package="${ext}"
+    if [ -n "${version}" ]; then
+        package="${ext}-${version}"
+    fi
+
+    "${PECL_BIN}" channel-update pecl.php.net >/dev/null 2>&1 || true
+    yes '' | "${PECL_BIN}" install "${package}" >/dev/null
+
+    [ -f "$(php_extension_dir)/${ext}.so" ] || die "Installed module file not found for: ${ext}"
+
+    available_ini="$(ext_write_ini "${ext}" "${ext}" "${ini_name}")"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+        ln -sf "${available_ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${available_ini}")"
+    fi
+
+    if [ "${no_cleanup}" != "yes" ]; then
+        php_build_deps_cleanup
+    fi
+}
+
+usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+${PROG} - PHP image control utility
+
+Usage:
+  ${PROG} [--output text|json|tsv] <command> [subcommand] [options]
+
+Commands:
+  help                 Show this help
+  version              Show ${PROG} version
+  info                 Show PHP runtime information
+  paths                Show important filesystem paths
+  doctor               Run diagnostics
+  self-test            Run quick runtime checks
+  status               Show runtime status
+  health               Show runtime health
+  metrics              Show metrics
+  serve                Serve health, status and metrics
+  ext                  Manage PHP extensions
+  fpm                  Manage PHP-FPM pools and config
+  ini                  Inspect PHP ini/config values
+
+Examples:
+  ${PROG} version
+  ${PROG} info
+  ${PROG} paths
+  ${PROG} doctor
+  ${PROG} self-test
+  ${PROG} status
+  ${PROG} health
+  ${PROG} metrics
+  ${PROG} ext list
+  ${PROG} ext enable redis
+  ${PROG} ext install redis --enable
+  ${PROG} fpm pool list
+  ${PROG} ini get memory_limit
+
+Run:
+  ${PROG} <command> --help
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+name=${PROG}
+version=${VERSION}
+usage=${PROG} [--output text|json|tsv] <command> [subcommand] [options]
+commands=help,version,info,paths,doctor,self-test,status,health,metrics,serve,ext,fpm,ini
+default_output=${OUTPUT_FORMAT}
+output_formats=text,json,tsv
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+show_version() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf '%s v%s\n' "${PROG}" "${VERSION}"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+name=${PROG}
+version=${VERSION}
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+show_info() {
+    php_bin_path="$(command -v "${PHP_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+    php_version="$("${PHP_BIN}" -r 'echo PHP_VERSION;' 2>/dev/null || printf '%s\n' "unknown")"
+    php_sapi="$("${PHP_BIN}" -r 'echo PHP_SAPI;' 2>/dev/null || printf '%s\n' "unknown")"
+    loaded_ini="$(php_loaded_ini)"
+    ini_scan_dir="$(php_ini_scan_dir)"
+    extension_dir="$(php_extension_dir)"
+    php_fpm_bin_path="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+
+    emit_object <<EOF
+php_bin=${php_bin_path}
+php_version=${php_version}
+php_sapi=${php_sapi}
+loaded_ini=${loaded_ini}
+ini_scan_dir=${ini_scan_dir}
+extension_dir=${extension_dir}
+php_fpm_bin=${php_fpm_bin_path}
+EOF
+}
+
+show_paths() {
+    php_bin_path="$(command -v "${PHP_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+    php_fpm_bin_path="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+    loaded_ini="$(php_loaded_ini)"
+    ini_scan_dir="$(php_ini_scan_dir)"
+    extension_dir="$(php_extension_dir)"
+
+    emit_object <<EOF
+php_bin=${php_bin_path}
+php_fpm_bin=${php_fpm_bin_path}
+loaded_ini=${loaded_ini}
+ini_scan_dir=${ini_scan_dir}
+extension_dir=${extension_dir}
+ext_available_dir=${PHP_EXT_AVAILABLE_DIR}
+ext_active_dir=${PHP_EXT_ACTIVE_DIR}
+fpm_pool_available_dir=${PHP_FPM_POOL_AVAILABLE_DIR}
+fpm_pool_active_dir=${PHP_FPM_POOL_ACTIVE_DIR}
+php_src_dir=${PHP_SRC_DIR}
+EOF
+}
+
+show_doctor() {
+    tmp="$(mktemp_file)"
+    printf 'check\tstatus\tdetails\n' > "${tmp}"
+
+    if cmd_exists "${PHP_BIN}"; then
+        php_bin_status="ok"
+        php_bin_details="$(command -v "${PHP_BIN}" 2>/dev/null || true)"
+    else
+        php_bin_status="fail"
+        php_bin_details="php binary not found"
+    fi
+    printf 'php_bin\t%s\t%s\n' "${php_bin_status}" "${php_bin_details}" >> "${tmp}"
+
+    loaded_ini="$(php_loaded_ini)"
+    if [ -n "${loaded_ini}" ] && [ "${loaded_ini}" != "(none)" ]; then
+        ini_status="ok"
+        ini_details="${loaded_ini}"
+    else
+        ini_status="warn"
+        ini_details="no loaded php.ini"
+    fi
+    printf 'loaded_ini\t%s\t%s\n' "${ini_status}" "${ini_details}" >> "${tmp}"
+
+    extdir="$(php_extension_dir)"
+    if [ -n "${extdir}" ] && [ -d "${extdir}" ]; then
+        extdir_status="ok"
+        extdir_details="${extdir}"
+    else
+        extdir_status="warn"
+        extdir_details="${extdir:-extension_dir missing}"
+    fi
+    printf 'extension_dir\t%s\t%s\n' "${extdir_status}" "${extdir_details}" >> "${tmp}"
+
+    if [ -d "${PHP_EXT_ACTIVE_DIR}" ]; then
+        active_dir_status="ok"
+        active_dir_details="${PHP_EXT_ACTIVE_DIR}"
+    else
+        active_dir_status="warn"
+        active_dir_details="missing: ${PHP_EXT_ACTIVE_DIR}"
+    fi
+    printf 'ext_active_dir\t%s\t%s\n' "${active_dir_status}" "${active_dir_details}" >> "${tmp}"
+
+    if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
+        avail_dir_status="ok"
+        avail_dir_details="${PHP_EXT_AVAILABLE_DIR}"
+    else
+        avail_dir_status="warn"
+        avail_dir_details="missing: ${PHP_EXT_AVAILABLE_DIR}"
+    fi
+    printf 'ext_available_dir\t%s\t%s\n' "${avail_dir_status}" "${avail_dir_details}" >> "${tmp}"
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        fpm_bin_status="ok"
+        fpm_bin_details="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || true)"
+    else
+        fpm_bin_status="info"
+        fpm_bin_details="php-fpm binary not available"
+    fi
+    printf 'php_fpm_bin\t%s\t%s\n' "${fpm_bin_status}" "${fpm_bin_details}" >> "${tmp}"
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            fpm_test_status="ok"
+            fpm_test_details="configuration valid"
+        else
+            fpm_test_status="warn"
+            fpm_test_details="configuration test failed"
+        fi
+    else
+        fpm_test_status="info"
+        fpm_test_details="skipped"
+    fi
+    printf 'php_fpm_test\t%s\t%s\n' "${fpm_test_status}" "${fpm_test_details}" >> "${tmp}"
+
+    if [ -d "${PHP_SRC_DIR}" ]; then
+        src_status="ok"
+        src_details="${PHP_SRC_DIR}"
+    else
+        src_status="warn"
+        src_details="missing: ${PHP_SRC_DIR}"
+    fi
+    printf 'php_src_dir\t%s\t%s\n' "${src_status}" "${src_details}" >> "${tmp}"
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+show_self_test() {
+    tmp="$(mktemp_file)"
+    printf 'test\tstatus\tdetails\n' > "${tmp}"
+
+    if "${PHP_BIN}" -v >/dev/null 2>&1; then
+        s1="ok"
+        d1="$("${PHP_BIN}" -v 2>/dev/null | head -n1 || true)"
+    else
+        s1="fail"
+        d1="php -v failed"
+    fi
+    printf 'php_version\t%s\t%s\n' "${s1}" "${d1}" >> "${tmp}"
+
+    if "${PHP_BIN}" -m >/dev/null 2>&1; then
+        s2="ok"
+        d2="php -m succeeded"
+    else
+        s2="fail"
+        d2="php -m failed"
+    fi
+    printf 'php_modules\t%s\t%s\n' "${s2}" "${d2}" >> "${tmp}"
+
+    if "${PHP_BIN}" --ini >/dev/null 2>&1; then
+        s3="ok"
+        d3="php --ini succeeded"
+    else
+        s3="fail"
+        d3="php --ini failed"
+    fi
+    printf 'php_ini\t%s\t%s\n' "${s3}" "${d3}" >> "${tmp}"
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            s4="ok"
+            d4="php-fpm configuration valid"
+        else
+            s4="fail"
+            d4="php-fpm configuration invalid"
+        fi
+    else
+        s4="info"
+        d4="php-fpm not available"
+    fi
+    printf 'php_fpm_test\t%s\t%s\n' "${s4}" "${d4}" >> "${tmp}"
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+show_status() {
+    php_ok="no"
+    fpm_ok="no"
+    config_ok="no"
+
+    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
+        php_ok="yes"
+    fi
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        fpm_ok="yes"
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            config_ok="yes"
+        fi
+    fi
+
+    loaded_ext_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
+    available_pools_count="0"
+    active_pools_count="0"
+
+    [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ] && available_pools_count="$(find "${PHP_FPM_POOL_AVAILABLE_DIR}" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d '[:space:]')"
+    [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ] && active_pools_count="$(find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | wc -l | tr -d '[:space:]')"
+
+    emit_object <<EOF
+php_ok=${php_ok}
+fpm_ok=${fpm_ok}
+config_ok=${config_ok}
+php_version=$(${PHP_BIN} -r 'echo PHP_VERSION;' 2>/dev/null || printf '%s' unknown)
+loaded_extensions=${loaded_ext_count}
+available_pools=${available_pools_count}
+active_pools=${active_pools_count}
+fpm_master_pid=$(php_fpm_master_pid 2>/dev/null || printf '%s' -)
+EOF
+}
+
+show_health() {
+    php_ok="no"
+    fpm_ok="no"
+    config_ok="no"
+
+    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
+        php_ok="yes"
+    fi
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        pid="$(php_fpm_master_pid 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
+            fpm_ok="yes"
+        fi
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            config_ok="yes"
+        fi
+    fi
+
+    ok="no"
+    if [ "${php_ok}" = "yes" ] && [ "${config_ok}" = "yes" ]; then
+        ok="yes"
+    fi
+
+    emit_object <<EOF
+ok=${ok}
+php_ok=${php_ok}
+fpm_ok=${fpm_ok}
+config_ok=${config_ok}
+fpm_master_pid=$(php_fpm_master_pid 2>/dev/null || printf '%s' -)
+EOF
+
+    [ "${ok}" = "yes" ] || exit 1
+}
+
+pool_name_from_path() {
+    base="$(basename "$1")"
+    base="${base%.pool.conf}"
+    base="${base%.conf}"
+    printf '%s\n' "${base}"
+}
+
+pool_config_get_value() {
+    file="$1"
+    key="$2"
+    awk -F '=' -v key="${key}" '
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            v=$0
+            sub(/^[^=]*=[[:space:]]*/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            print v
+            exit
+        }
+    ' "${file}" 2>/dev/null || true
+}
+
+show_metrics_text() {
+    php_up=0
+    fpm_up=0
+    fpm_config_valid=0
+
+    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
+        php_up=1
+    fi
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        pid="$(php_fpm_master_pid 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
+            fpm_up=1
+        fi
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            fpm_config_valid=1
+        fi
+    fi
+
+    loaded_ext_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
+    pools_available="0"
+    pools_enabled="0"
+
+    [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ] && pools_available="$(find "${PHP_FPM_POOL_AVAILABLE_DIR}" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d '[:space:]')"
+    [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ] && pools_enabled="$(find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | wc -l | tr -d '[:space:]')"
+
+    printf '%s\n' '# HELP phpctl_php_up PHP CLI availability'
+    printf '%s\n' '# TYPE phpctl_php_up gauge'
+    printf 'phpctl_php_up %s\n' "${php_up}"
+
+    printf '%s\n' '# HELP phpctl_fpm_up PHP-FPM master process availability'
+    printf '%s\n' '# TYPE phpctl_fpm_up gauge'
+    printf 'phpctl_fpm_up %s\n' "${fpm_up}"
+
+    printf '%s\n' '# HELP phpctl_fpm_config_valid PHP-FPM configuration validity'
+    printf '%s\n' '# TYPE phpctl_fpm_config_valid gauge'
+    printf 'phpctl_fpm_config_valid %s\n' "${fpm_config_valid}"
+
+    printf '%s\n' '# HELP phpctl_extensions_loaded Number of loaded PHP extensions'
+    printf '%s\n' '# TYPE phpctl_extensions_loaded gauge'
+    printf 'phpctl_extensions_loaded %s\n' "${loaded_ext_count}"
+
+    printf '%s\n' '# HELP phpctl_fpm_pools_available Number of available FPM pools'
+    printf '%s\n' '# TYPE phpctl_fpm_pools_available gauge'
+    printf 'phpctl_fpm_pools_available %s\n' "${pools_available}"
+
+    printf '%s\n' '# HELP phpctl_fpm_pools_enabled Number of enabled FPM pools'
+    printf '%s\n' '# TYPE phpctl_fpm_pools_enabled gauge'
+    printf 'phpctl_fpm_pools_enabled %s\n' "${pools_enabled}"
+
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | sort | while IFS= read -r pool_file; do
+            pool_name="$(pool_name_from_path "${pool_file}")"
+            listen_value="$(pool_config_get_value "${pool_file}" listen)"
+            socket_exists=0
+            if [ -n "${listen_value}" ]; then
+                case "${listen_value}" in
+                    /*) [ -S "${listen_value}" ] && socket_exists=1 ;;
+                esac
+            fi
+            printf 'phpctl_fpm_pool_enabled{pool=%s} 1\n' "$(json_quote "${pool_name}")"
+            printf 'phpctl_fpm_pool_socket_exists{pool=%s} %s\n' "$(json_quote "${pool_name}")" "${socket_exists}"
+        done
+    fi
+}
+
+show_metrics() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            show_metrics_text
+            ;;
+        json|tsv)
+            emit_object <<EOF
+php_up=$(cmd_exists "${PHP_BIN}" && ${PHP_BIN} -v >/dev/null 2>&1 && printf yes || printf no)
+fpm_up=$(pid="$(php_fpm_master_pid 2>/dev/null || true)"; [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1 && printf yes || printf no)
+fpm_config_valid=$(cmd_exists "${PHP_FPM_BIN}" && ${PHP_FPM_BIN} -t >/dev/null 2>&1 && printf yes || printf no)
+loaded_extensions=$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ext_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} ext <subcommand> [args]
+
+Subcommands:
+  list                 List discovered extensions
+  list-loaded          List loaded extensions
+  versions             Show loaded extensions with versions
+  detect <ext>         Detect extension type
+  pecl-list            Show PECL registry packages
+  so-list              Show extension directory shared objects
+  status <ext>         Show status of one extension
+  install <ext>        Install one extension
+  uninstall <ext>      Uninstall one extension
+  enable <ext>         Enable extension by linking ini into active dir
+  disable <ext>        Disable extension by removing active ini
+  enable-all           Enable all available extensions
+  disable-all          Disable all active extension ini files
+  doctor               Run extension-specific diagnostics
+  help                 Show this help
+
+Examples:
+  ${PROG} ext list
+  ${PROG} ext detect gd
+  ${PROG} ext status redis
+  ${PROG} ext install redis --type pecl --enable
+  ${PROG} ext install gd --type core --enable
+  ${PROG} ext enable redis
+  ${PROG} ext disable redis
+  ${PROG} ext uninstall redis
+  ${PROG} ext enable-all
+  ${PROG} ext doctor
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=ext
+usage=${PROG} ext <subcommand> [args]
+subcommands=list,list-loaded,versions,detect,pecl-list,so-list,status,install,uninstall,enable,disable,enable-all,disable-all,doctor,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ext_list() {
+    tmp_names="$(mktemp_file)"
+    tmp_rows="$(mktemp_file)"
+    : > "${tmp_names}"
+
+    if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
+        for f in "${PHP_EXT_AVAILABLE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            ext_name_from_ini "${f}" >> "${tmp_names}"
+        done
+    fi
+
+    if [ -d "${PHP_EXT_ACTIVE_DIR}" ]; then
+        for f in "${PHP_EXT_ACTIVE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            ext_name_from_ini "${f}" >> "${tmp_names}"
+        done
+    fi
+
+    php_loaded_extensions_list >> "${tmp_names}"
+
+    printf 'name\tavailable\tactive\tloaded\tversion\ttype\tavailable_ini\tactive_ini\n' > "${tmp_rows}"
+
+    if [ -s "${tmp_names}" ]; then
+        sort -fu "${tmp_names}" | while IFS= read -r ext; do
+            [ -n "${ext}" ] || continue
+            collect_ext_row "${ext}"
+        done >> "${tmp_rows}"
+    fi
+
+    render_table_file "${tmp_rows}"
+
+    rm -f "${tmp_names}" "${tmp_rows}"
+}
+
+ext_list_loaded() {
+    tmp="$(mktemp_file)"
+    printf 'name\n' > "${tmp}"
+    php_loaded_extensions_list | while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
+        printf '%s\n' "${ext}"
+    done >> "${tmp}"
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_versions() {
+    tmp="$(mktemp_file)"
+    printf 'name\tversion\n' > "${tmp}"
+    php_loaded_extensions_list | while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
+        printf '%s\t%s\n' "${ext}" "$(php_ext_version "${ext}")"
+    done >> "${tmp}"
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_pecl_list() {
+    tmp="$(mktemp_file)"
+    printf 'name\tversion\tstate\n' > "${tmp}"
+
+    if cmd_exists "${PECL_BIN}"; then
+        "${PECL_BIN}" list 2>/dev/null | awk '
+            BEGIN { capture=0 }
+            /^Package[[:space:]]+Version[[:space:]]+State/ { capture=1; next }
+            /^=+/ { next }
+            capture == 1 && NF >= 3 { print $1 "\t" $2 "\t" $3 }
+        ' >> "${tmp}" || true
+    fi
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_so_list() {
+    tmp="$(mktemp_file)"
+    extdir="$(php_extension_dir)"
+    printf 'name\tpath\tsize\n' > "${tmp}"
+
+    if [ -n "${extdir}" ] && [ -d "${extdir}" ]; then
+        find "${extdir}" -maxdepth 1 -type f -name '*.so' | sort | while IFS= read -r sofile; do
+            [ -n "${sofile}" ] || continue
+            name="$(basename "${sofile}" .so)"
+            size="$(wc -c < "${sofile}" | tr -d '[:space:]')"
+            printf '%s\t%s\t%s\n' "${name}" "${sofile}" "${size}"
+        done >> "${tmp}"
+    fi
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_status() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext status <ext>"
+    ext="$1"
+
+    avail="no"
+    active="no"
+    loaded="no"
+    version="-"
+    available_ini="-"
+    active_ini="-"
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        avail="yes"
+        available_ini="$(resolve_ext_ini "${ext}")"
+    elif ext_module_file_exists "${ext}"; then
+        avail="yes"
+    fi
+
+    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        active="yes"
+        active_ini="$(resolve_ext_active_ini "${ext}")"
+    fi
+
+    if ext_is_loaded "${ext}"; then
+        loaded="yes"
+        version="$(php_ext_version "${ext}")"
+    fi
+
+    emit_object <<EOF
+name=${ext}
+available=${avail}
+active=${active}
+loaded=${loaded}
+version=${version}
+type=$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)
+available_ini=${available_ini}
+active_ini=${active_ini}
+extension_dir=$(php_extension_dir)
+EOF
+}
+
+ext_enable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext enable <ext>"
+    ext="$1"
+    ini="$(resolve_ext_ini "${ext}" 2>/dev/null || true)"
+
+    [ -n "${ini}" ] || die "No available ini found for extension: ${ext}"
+
+    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+    ln -sf "${ini}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${ini}")"
+
+    emit_object <<EOF
+ok=yes
+action=enable
+extension=${ext}
+active=yes
+active_ini=${PHP_EXT_ACTIVE_DIR}/$(basename "${ini}")
+EOF
+}
+
+ext_disable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ext disable <ext>"
+    ext="$1"
+
+    removed="no"
+    removed_ini="-"
+
+    for candidate in \
+        "${PHP_EXT_ACTIVE_DIR}/docker-php-ext-${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/${ext}.ini" \
+        "${PHP_EXT_ACTIVE_DIR}/zz-${ext}.ini"
+    do
+        if [ -e "${candidate}" ]; then
+            rm -f "${candidate}"
+            removed="yes"
+            removed_ini="${candidate}"
+        fi
+    done
+
+    emit_object <<EOF
+ok=yes
+action=disable
+extension=${ext}
+removed=${removed}
+removed_ini=${removed_ini}
+EOF
+}
+
+ext_enable_all() {
+    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+    tmp="$(mktemp_file)"
+    printf 'name\tresult\tactive_ini\n' > "${tmp}"
+
+    if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
+        for f in "${PHP_EXT_AVAILABLE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            ln -sf "${f}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${f}")"
+            printf '%s\tenabled\t%s\n' "$(ext_name_from_ini "${f}")" "${PHP_EXT_ACTIVE_DIR}/$(basename "${f}")" >> "${tmp}"
+        done
+    fi
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_disable_all() {
+    tmp="$(mktemp_file)"
+    printf 'name\tresult\tactive_ini\n' > "${tmp}"
+
+    if [ -d "${PHP_EXT_ACTIVE_DIR}" ]; then
+        for f in "${PHP_EXT_ACTIVE_DIR}"/*.ini; do
+            [ -e "${f}" ] || continue
+            printf '%s\tdisabled\t%s\n' "$(ext_name_from_ini "${f}")" "${f}" >> "${tmp}"
+            rm -f "${f}"
+        done
+    fi
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_doctor() {
+    tmp="$(mktemp_file)"
+    printf 'check\tstatus\tdetails\n' > "${tmp}"
+
+    if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
+        s1="ok"
+        d1="${PHP_EXT_AVAILABLE_DIR}"
+    else
+        s1="warn"
+        d1="missing: ${PHP_EXT_AVAILABLE_DIR}"
+    fi
+    printf 'available_dir\t%s\t%s\n' "${s1}" "${d1}" >> "${tmp}"
+
+    if [ -d "${PHP_EXT_ACTIVE_DIR}" ]; then
+        s2="ok"
+        d2="${PHP_EXT_ACTIVE_DIR}"
+    else
+        s2="warn"
+        d2="missing: ${PHP_EXT_ACTIVE_DIR}"
+    fi
+    printf 'active_dir\t%s\t%s\n' "${s2}" "${d2}" >> "${tmp}"
+
+    extdir="$(php_extension_dir)"
+    if [ -n "${extdir}" ] && [ -d "${extdir}" ]; then
+        s3="ok"
+        d3="${extdir}"
+    else
+        s3="warn"
+        d3="${extdir:-extension_dir missing}"
+    fi
+    printf 'extension_dir\t%s\t%s\n' "${s3}" "${d3}" >> "${tmp}"
+
+    if [ -d "${PHP_SRC_DIR}" ]; then
+        s4="ok"
+        d4="${PHP_SRC_DIR}"
+    else
+        s4="warn"
+        d4="missing: ${PHP_SRC_DIR}"
+    fi
+    printf 'php_src_dir\t%s\t%s\n' "${s4}" "${d4}" >> "${tmp}"
+
+    loaded_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
+    printf 'loaded_extensions\tok\t%s\n' "${loaded_count}" >> "${tmp}"
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+ext_install_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} ext install <ext> [options]
+
+Options:
+  --type <auto|core|pecl> Detect or force extension source type
+  --enable                 Enable extension after successful install
+  --version <ver>          Install a specific PECL version
+  --apk <pkgs...>          Additional build dependencies installed via apk
+  --runtime <pkgs...>      Additional runtime packages installed via apk
+  --jobs <n>               Build jobs for core extensions
+  --configure <arg>        Add configure arg for core extension build
+  --ini-name <name>        Override generated ini file name
+  --force                  Reinstall even if extension appears installed
+  --no-cleanup             Do not remove temporary build dependencies
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=ext_install
+usage=${PROG} ext install <ext> [options]
+options=--type,--enable,--version,--apk,--runtime,--jobs,--configure,--ini-name,--force,--no-cleanup
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ext_install() {
+    [ $# -gt 0 ] || die "Usage: ${PROG} ext install <ext> [options]"
+
+    ext="$1"
+    shift
+
+    type="auto"
+    enable_after="no"
+    pecl_version=""
+    apk_deps=""
+    runtime_pkgs=""
+    jobs="1"
+    ini_name=""
+    force="no"
+    no_cleanup="no"
+    configure_args_file="$(mktemp_file)"
+    : > "${configure_args_file}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --type)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --type"
+                case "$1" in
+                    auto|core|pecl) type="$1" ;;
+                    *) rm -f "${configure_args_file}"; die "Unsupported extension type: $1" ;;
+                esac
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            --version)
+                shift
+                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --version"; }
+                pecl_version="$1"
+                shift
+                ;;
+            --apk)
+                shift
+                while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+                    apk_deps="${apk_deps} $1"
+                    shift
+                done
+                ;;
+            --runtime)
+                shift
+                while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do
+                    runtime_pkgs="${runtime_pkgs} $1"
+                    shift
+                done
+                ;;
+            --jobs)
+                shift
+                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --jobs"; }
+                jobs="$1"
+                shift
+                ;;
+            --configure)
+                shift
+                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --configure"; }
+                printf '%s\n' "$1" >> "${configure_args_file}"
+                shift
+                ;;
+            --ini-name)
+                shift
+                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --ini-name"; }
+                ini_name="$1"
+                shift
+                ;;
+            --force)
+                force="yes"
+                shift
+                ;;
+            --no-cleanup)
+                no_cleanup="yes"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${configure_args_file}"
+                ext_install_usage
+                return 0
+                ;;
+            *)
+                rm -f "${configure_args_file}"
+                die "Unknown install option: $1"
+                ;;
+        esac
+    done
+
+    if [ "${force}" != "yes" ]; then
+        if ext_is_available "${ext}" || resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+            rm -f "${configure_args_file}"
+            die "Extension already appears installed: ${ext}. Use --force to reinstall."
+        fi
+    fi
+
+    if [ "${type}" = "auto" ]; then
+        detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
+        case "${detected}" in
+            core) type="core" ;;
+            pecl) type="pecl" ;;
+            core-known-but-source-missing)
+                rm -f "${configure_args_file}"
+                die "Extension looks like a core extension but PHP source tree is missing: ${ext}"
+                ;;
+            *)
+                rm -f "${configure_args_file}"
+                die "Unable to detect extension type for: ${ext}"
+                ;;
+        esac
+    fi
+
+    if [ "${type}" = "core" ] && [ -n "${pecl_version}" ]; then
+        rm -f "${configure_args_file}"
+        die "--version is only supported for PECL extensions"
+    fi
+
+    if [ "${type}" = "pecl" ]; then
+        ext_install_pecl "${ext}" "${pecl_version}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }"
+        package="${ext}"
+        if [ -n "${pecl_version}" ]; then
+            package="${ext}-${pecl_version}"
+        fi
+    else
+        ext_install_core "${ext}" "${jobs}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }" "${configure_args_file}"
+        package="${ext}"
+    fi
+
+    rm -f "${configure_args_file}"
+
+    avail="no"
+    active="no"
+    loaded="no"
+    version="-"
+    available_ini="-"
+    active_ini="-"
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        avail="yes"
+        available_ini="$(resolve_ext_ini "${ext}")"
+    elif ext_module_file_exists "${ext}"; then
+        avail="yes"
+    fi
+
+    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        active="yes"
+        active_ini="$(resolve_ext_active_ini "${ext}")"
+    fi
+
+    if ext_is_loaded "${ext}"; then
+        loaded="yes"
+        version="$(php_ext_version "${ext}")"
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=install
+extension=${ext}
+type=${type}
+requested_package=${package}
+enabled=${enable_after}
+available=${avail}
+active=${active}
+loaded=${loaded}
+version=${version}
+available_ini=${available_ini}
+active_ini=${active_ini}
+cleanup_performed=$( [ "${no_cleanup}" = "yes" ] && printf '%s' "no" || printf '%s' "yes" )
+EOF
+}
+
+ext_uninstall_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} ext uninstall <ext> [--type auto|core|pecl] [--force]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=ext_uninstall
+usage=${PROG} ext uninstall <ext> [--type auto|core|pecl] [--force]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ext_uninstall() {
+    [ $# -gt 0 ] || die "Usage: ${PROG} ext uninstall <ext> [options]"
+    ext="$1"
+    shift
+
+    type="auto"
+    force="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --type)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --type"
+                type="$1"
+                shift
+                ;;
+            --force)
+                force="yes"
+                shift
+                ;;
+            -h|--help)
+                ext_uninstall_usage
+                return 0
+                ;;
+            *)
+                die "Unknown uninstall option: $1"
+                ;;
+        esac
+    done
+
+    if [ "${type}" = "auto" ]; then
+        detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
+        case "${detected}" in
+            core) type="core" ;;
+            pecl) type="pecl" ;;
+            *) type="unknown" ;;
+        esac
+    fi
+
+    if [ "${force}" != "yes" ] && resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
+        die "Extension is active: ${ext}. Disable it first or use --force."
+    fi
+
+    ext_disable "${ext}" >/dev/null 2>&1 || true
+
+    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+        rm -f "$(resolve_ext_ini "${ext}")"
+    fi
+
+    if [ -f "$(php_extension_dir)/${ext}.so" ]; then
+        rm -f "$(php_extension_dir)/${ext}.so"
+    fi
+
+    if [ "${type}" = "pecl" ] && cmd_exists "${PECL_BIN}"; then
+        "${PECL_BIN}" uninstall -r "${ext}" >/dev/null 2>&1 || true
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=uninstall
+extension=${ext}
+type=${type}
+removed=yes
+EOF
+}
+
+handle_ext() {
+    [ $# -gt 0 ] || { ext_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            ext_usage
+            ;;
+        list)
+            shift
+            ext_list "$@"
+            ;;
+        list-loaded)
+            shift
+            ext_list_loaded "$@"
+            ;;
+        versions)
+            shift
+            ext_versions "$@"
+            ;;
+        detect)
+            shift
+            ext_detect "$@"
+            ;;
+        pecl-list)
+            shift
+            ext_pecl_list "$@"
+            ;;
+        so-list)
+            shift
+            ext_so_list "$@"
+            ;;
+        status)
+            shift
+            ext_status "$@"
+            ;;
+        install)
+            shift
+            ext_install "$@"
+            ;;
+        uninstall)
+            shift
+            ext_uninstall "$@"
+            ;;
+        enable)
+            shift
+            ext_enable "$@"
+            ;;
+        disable)
+            shift
+            ext_disable "$@"
+            ;;
+        enable-all)
+            shift
+            ext_enable_all "$@"
+            ;;
+        disable-all)
+            shift
+            ext_disable_all "$@"
+            ;;
+        doctor)
+            shift
+            ext_doctor "$@"
+            ;;
+        *)
+            die "Unknown ext subcommand: $1"
+            ;;
+    esac
+}
+
+resolve_pool_available() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}"
+    do
+        [ -f "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+resolve_pool_active() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}"
+    do
+        [ -e "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+fpm_default_pool_template() {
+    cat <<EOF
+[{{POOL_NAME}}]
+user = {{USER}}
+group = {{GROUP}}
+listen = {{LISTEN}}
+listen.owner = {{LISTEN_OWNER}}
+listen.group = {{LISTEN_GROUP}}
+pm = {{PM}}
+pm.max_children = {{PM_MAX_CHILDREN}}
+pm.start_servers = {{PM_START_SERVERS}}
+pm.min_spare_servers = {{PM_MIN_SPARE_SERVERS}}
+pm.max_spare_servers = {{PM_MAX_SPARE_SERVERS}}
+catch_workers_output = {{CATCH_WORKERS_OUTPUT}}
+clear_env = {{CLEAR_ENV}}
+{{ if ENABLE_PING }}
+ping.path = {{ PING_PATH | default("/fpm-ping") }}
+ping.response = {{ PING_RESPONSE | default("pong") }}
+{{ endif }}
+{{ if ENABLE_METRICS }}
+pm.status_path = {{ STATUS_PATH | default("/fpm-status") }}
+{{ endif }}
+EOF
+}
+
+pool_params_set() {
+    file="$1"
+    key="$2"
+    value="$3"
+    tmp="$(mktemp_file)"
+    if [ -f "${file}" ]; then
+        awk -F '=' -v k="${key}" '$1 != k { print }' "${file}" > "${tmp}" || true
+    else
+        : > "${tmp}"
+    fi
+    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}"
+    mv "${tmp}" "${file}"
+}
+
+pool_params_load_file() {
+    dst="$1"
+    src="$2"
+    [ -f "${src}" ] || die "Params file not found: ${src}"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        case "${line}" in
+            \#*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        [ "${key}" != "${line}" ] || continue
+        pool_params_set "${dst}" "${key}" "${value}"
+    done < "${src}"
+}
+
+fpm_pool_build_params() {
+    name="$1"
+
+    params_file="$(mktemp_file)"
+    : > "${params_file}"
+
+    pool_params_set "${params_file}" "POOL_NAME" "${name}"
+    pool_params_set "${params_file}" "USER" "www-data"
+    pool_params_set "${params_file}" "GROUP" "www-data"
+    pool_params_set "${params_file}" "LISTEN" "/var/run/php-fpm-${name}.sock"
+    pool_params_set "${params_file}" "LISTEN_OWNER" "www-data"
+    pool_params_set "${params_file}" "LISTEN_GROUP" "www-data"
+    pool_params_set "${params_file}" "PM" "dynamic"
+    pool_params_set "${params_file}" "PM_MAX_CHILDREN" "8"
+    pool_params_set "${params_file}" "PM_START_SERVERS" "2"
+    pool_params_set "${params_file}" "PM_MIN_SPARE_SERVERS" "1"
+    pool_params_set "${params_file}" "PM_MAX_SPARE_SERVERS" "3"
+    pool_params_set "${params_file}" "CATCH_WORKERS_OUTPUT" "yes"
+    pool_params_set "${params_file}" "CLEAR_ENV" "no"
+    pool_params_set "${params_file}" "ENABLE_METRICS" "false"
+    pool_params_set "${params_file}" "STATUS_PATH" ""
+    pool_params_set "${params_file}" "ENABLE_PING" "false"
+    pool_params_set "${params_file}" "PING_PATH" ""
+    pool_params_set "${params_file}" "PING_RESPONSE" ""
+
+    printf '%s\n' "${params_file}"
+}
+
+fpm_pool_render_content() {
+    name="$1"
+    template_file="$2"
+    params_file="$3"
+
+    render_template="$(mktemp_file)"
+    if [ -n "${template_file}" ]; then
+        [ -f "${template_file}" ] || die "Template not found: ${template_file}"
+        cat "${template_file}" > "${render_template}"
+    elif [ -n "${PHP_FPM_POOL_TEMPLATE}" ]; then
+        [ -f "${PHP_FPM_POOL_TEMPLATE}" ] || die "Template not found: ${PHP_FPM_POOL_TEMPLATE}"
+        cat "${PHP_FPM_POOL_TEMPLATE}" > "${render_template}"
+    else
+        fpm_default_pool_template > "${render_template}"
+    fi
+
+    PHPCTL_TEMPLATE_FILE="${render_template}" PHPCTL_PARAMS_FILE="${params_file}" "${PHP_BIN}" -r '
+        function loadParams(string $file): array {
+            $params = [];
+            foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+                if ($line === "" || strpos($line, "#") === 0) {
+                    continue;
+                }
+                $parts = explode("=", $line, 2);
+                if (count($parts) === 2) {
+                    $params[$parts[0]] = $parts[1];
+                }
+            }
+            return $params;
+        }
+
+        function isTrueValue($value): bool {
+            $v = strtolower(trim((string) $value));
+            return in_array($v, ["1", "true", "yes", "on"], true);
+        }
+
+        function isEmptyValue($value): bool {
+            return trim((string) $value) === "";
+        }
+
+        function evalIfExpr(string $expr, array $params): bool {
+            $expr = trim($expr);
+
+            if (preg_match("/^empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
+                $key = $m[1];
+                return isEmptyValue($params[$key] ?? "");
+            }
+
+            if (preg_match("/^not\\s+empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
+                $key = $m[1];
+                return !isEmptyValue($params[$key] ?? "");
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)\\s*==\\s*(.+)$/i", $expr, $m)) {
+                $key = $m[1];
+                $expected = trim($m[2]);
+                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
+                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
+                return (string) ($params[$key] ?? "") === $expected;
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)\\s*!=\\s*(.+)$/i", $expr, $m)) {
+                $key = $m[1];
+                $expected = trim($m[2]);
+                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
+                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
+                return (string) ($params[$key] ?? "") !== $expected;
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)$/i", $expr, $m)) {
+                $key = $m[1];
+                return isTrueValue($params[$key] ?? "");
+            }
+
+            return false;
+        }
+
+        function renderVars(string $text, array $params): string {
+            return preg_replace_callback("/\\{\\{\\s*([A-Z0-9_]+)(?:\\s*\\|\\s*default\\((.*?)\\))?\\s*\\}\\}/i", function ($m) use ($params) {
+                $key = $m[1];
+                $value = $params[$key] ?? "";
+                if (isset($m[2])) {
+                    $default = trim($m[2]);
+                    $default = preg_replace("/^\"(.*)\"$/", "$1", $default);
+                    $default = preg_replace("/^\x27(.*)\x27$/", "$1", $default);
+                    if (trim((string) $value) === "") {
+                        $value = $default;
+                    }
+                }
+                return (string) $value;
+            }, $text);
+        }
+
+        function renderTemplate(string $template, array $params): string {
+            $lines = preg_split("/\\r?\\n/", $template);
+            $out = [];
+            $stack = [true];
+
+            foreach ($lines as $line) {
+                if (preg_match("/^\\s*\\{\\{\\s*if\\s+(.+?)\\s*\\}\\}\\s*$/", $line, $m)) {
+                    $parent = end($stack);
+                    $stack[] = $parent && evalIfExpr($m[1], $params);
+                    continue;
+                }
+
+                if (preg_match("/^\\s*\\{\\{\\s*endif\\s*\\}\\}\\s*$/", $line)) {
+                    if (count($stack) > 1) {
+                        array_pop($stack);
+                    }
+                    continue;
+                }
+
+                if (end($stack)) {
+                    $out[] = renderVars($line, $params);
+                }
+            }
+
+            return implode(PHP_EOL, $out) . PHP_EOL;
+        }
+
+        $template = file_get_contents(getenv("PHPCTL_TEMPLATE_FILE"));
+        $params = loadParams(getenv("PHPCTL_PARAMS_FILE"));
+        echo renderTemplate($template, $params);
+    '
+    rm -f "${render_template}"
+}
+
+fpm_pool_render_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
+
+Show rendered pool configuration.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_render
+usage=${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_create_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--enable]
+
+Create pool configuration in the available directory.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_create
+usage=${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_generate_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--output-file <file>]
+
+Generate pool configuration for manual editing.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_generate
+usage=${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--output-file <file>]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_import_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool import <name> --from <file> [--enable]
+
+Import an existing pool configuration into the available directory.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_import
+usage=${PROG} fpm pool import <name> --from <file> [--enable]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_render() {
+    [ $# -gt 0 ] || { fpm_pool_render_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}"
+                fpm_pool_render_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}"
+                die "Unknown pool render option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            fpm_pool_render_content "${name}" "${template_file}" "${params_file}"
+            ;;
+        json|tsv)
+            rendered_file="$(mktemp_file)"
+            fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
+            emit_object <<EOF
+pool=${name}
+template=$( [ -n "${template_file}" ] && printf '%s' "${template_file}" || printf '%s' "${PHP_FPM_POOL_TEMPLATE:-builtin}" )
+content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
+EOF
+            rm -f "${rendered_file}"
+            ;;
+        *)
+            rm -f "${params_file}"
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    rm -f "${params_file}"
+}
+
+fpm_pool_create() {
+    [ $# -gt 0 ] || { fpm_pool_create_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+    enable_after="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}"
+                fpm_pool_create_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}"
+                die "Unknown pool create option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
+    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
+    fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${target}"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
+    fi
+
+    rm -f "${params_file}"
+
+    emit_object <<EOF
+ok=yes
+action=create
+pool=${name}
+available=yes
+active=${enable_after}
+available_path=${target}
+active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
+EOF
+}
+
+fpm_pool_generate() {
+    [ $# -gt 0 ] || { fpm_pool_generate_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+    output_file=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            --output-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --output-file"; }
+                output_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}"
+                fpm_pool_generate_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}"
+                die "Unknown pool generate option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    if [ -n "${output_file}" ]; then
+        fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${output_file}"
+        emit_object <<EOF
+ok=yes
+action=generate
+pool=${name}
+output_file=${output_file}
+EOF
+    else
+        case "${OUTPUT_FORMAT}" in
+            text)
+                fpm_pool_render_content "${name}" "${template_file}" "${params_file}"
+                ;;
+            json|tsv)
+                rendered_file="$(mktemp_file)"
+                fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
+                emit_object <<EOF
+ok=yes
+action=generate
+pool=${name}
+content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
+EOF
+                rm -f "${rendered_file}"
+                ;;
+            *)
+                rm -f "${params_file}"
+                die "Unsupported output format: ${OUTPUT_FORMAT}"
+                ;;
+        esac
+    fi
+
+    rm -f "${params_file}"
+}
+
+fpm_pool_import() {
+    [ $# -gt 0 ] || { fpm_pool_import_usage; return 0; }
+    name="$1"
+    shift
+
+    src=""
+    enable_after="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --from"
+                src="$1"
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            -h|--help)
+                fpm_pool_import_usage
+                return 0
+                ;;
+            *)
+                die "Unknown pool import option: $1"
+                ;;
+        esac
+    done
+
+    [ -n "${src}" ] || die "Missing required option --from"
+    [ -f "${src}" ] || die "Pool source file not found: ${src}"
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
+    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
+    cp "${src}" "${target}"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=import
+pool=${name}
+available=yes
+active=${enable_after}
+available_path=${target}
+active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
+EOF
+}
+
+fpm_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm <subcommand> [args]
+
+Subcommands:
+  status               Show php-fpm binary and config test result
+  test                 Run php-fpm -t
+  configtest           Alias of test
+  reload               Reload php-fpm master process
+  pool list            List available and active pools
+  pool render <name>   Render pool file content
+  pool create <name>   Create pool config in the available dir
+  pool generate <name> Generate pool config for manual editing
+  pool import <name>   Import existing pool config file
+  pool enable <name>   Enable pool config by linking it into active dir
+  pool disable <name>  Disable pool config by removing it from active dir
+  pool delete <name>   Delete pool config
+  pool validate <name> Validate pool config by running php-fpm -t
+  pool show <name>     Show pool file paths
+  help                 Show this help
+
+Examples:
+  ${PROG} fpm status
+  ${PROG} fpm test
+  ${PROG} fpm reload
+  ${PROG} fpm pool list
+  ${PROG} fpm pool render app -p ENABLE_METRICS=true
+  ${PROG} fpm pool create app -p ENABLE_METRICS=true --enable
+  ${PROG} fpm pool generate app --output-file ./app.conf
+  ${PROG} fpm pool import app --from ./app.conf --enable
+  ${PROG} fpm pool enable www
+  ${PROG} fpm pool disable www
+  ${PROG} fpm pool show www
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm
+usage=${PROG} fpm <subcommand> [args]
+subcommands=status,test,configtest,reload,pool list,pool render,pool create,pool generate,pool import,pool enable,pool disable,pool delete,pool validate,pool show,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_status() {
+    bin_path="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+    available="no"
+    config_ok="no"
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        available="yes"
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            config_ok="yes"
+        fi
+    fi
+
+    emit_object <<EOF
+php_fpm_bin=${bin_path}
+available=${available}
+config_ok=${config_ok}
+master_pid=$(php_fpm_master_pid 2>/dev/null || printf '%s' -)
+EOF
+}
+
+fpm_test() {
+    if ! cmd_exists "${PHP_FPM_BIN}"; then
+        die "php-fpm binary not found"
+    fi
+
+    if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+        status="ok"
+        ok="yes"
+        details="configuration valid"
+    else
+        status="fail"
+        ok="no"
+        details="configuration invalid"
+    fi
+
+    emit_object <<EOF
+ok=${ok}
+status=${status}
+details=${details}
+EOF
+}
+
+fpm_reload() {
+    cmd_exists "${PHP_FPM_BIN}" || die "php-fpm binary not found"
+    "${PHP_FPM_BIN}" -t >/dev/null 2>&1 || die "php-fpm configuration invalid"
+
+    pid="$(php_fpm_master_pid 2>/dev/null || true)"
+    [ -n "${pid}" ] || die "php-fpm master process not found"
+
+    kill -s "${PHP_FPM_RELOAD_SIGNAL}" "${pid}" >/dev/null 2>&1 || die "Unable to send reload signal"
+
+    emit_object <<EOF
+ok=yes
+status=ok
+signal=${PHP_FPM_RELOAD_SIGNAL}
+pid=${pid}
+details=reloaded
+EOF
+}
+
+fpm_pool_list() {
+    tmp_names="$(mktemp_file)"
+    tmp_rows="$(mktemp_file)"
+    : > "${tmp_names}"
+
+    if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
+        for f in "${PHP_FPM_POOL_AVAILABLE_DIR}"/*; do
+            [ -e "${f}" ] || continue
+            pool_name_from_path "${f}" >> "${tmp_names}"
+        done
+    fi
+
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        for f in "${PHP_FPM_POOL_ACTIVE_DIR}"/*; do
+            [ -e "${f}" ] || continue
+            case "$(basename "${f}")" in
+                *.conf|*.pool.conf) pool_name_from_path "${f}" >> "${tmp_names}" ;;
+            esac
+        done
+    fi
+
+    printf 'name\tavailable\tactive\tavailable_path\tactive_path\n' > "${tmp_rows}"
+
+    if [ -s "${tmp_names}" ]; then
+        sort -fu "${tmp_names}" | while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            avail="no"
+            active="no"
+            available_path="-"
+            active_path="-"
+
+            if resolve_pool_available "${name}" >/dev/null 2>&1; then
+                avail="yes"
+                available_path="$(resolve_pool_available "${name}")"
+            fi
+
+            if resolve_pool_active "${name}" >/dev/null 2>&1; then
+                active="yes"
+                active_path="$(resolve_pool_active "${name}")"
+            fi
+
+            printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${avail}" "${active}" "${available_path}" "${active_path}"
+        done >> "${tmp_rows}"
+    fi
+
+    render_table_file "${tmp_rows}"
+
+    rm -f "${tmp_names}" "${tmp_rows}"
+}
+
+fpm_pool_enable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool enable <name>"
+    name="$1"
+    src="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+    [ -n "${src}" ] || die "Pool not found in available dir: ${name}"
+
+    mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+    ln -sf "${src}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")"
+
+    emit_object <<EOF
+ok=yes
+action=enable
+pool=${name}
+active=yes
+active_path=${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")
+EOF
+}
+
+fpm_pool_disable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool disable <name>"
+    name="$1"
+    dst="$(resolve_pool_active "${name}" 2>/dev/null || true)"
+    [ -n "${dst}" ] || die "Pool not active: ${name}"
+
+    rm -f "${dst}"
+
+    emit_object <<EOF
+ok=yes
+action=disable
+pool=${name}
+active=no
+removed_path=${dst}
+EOF
+}
+
+fpm_pool_delete() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool delete <name>"
+    name="$1"
+
+    active_path="$(resolve_pool_active "${name}" 2>/dev/null || true)"
+    available_path="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+
+    [ -n "${active_path}" ] && rm -f "${active_path}"
+    [ -n "${available_path}" ] && rm -f "${available_path}"
+
+    emit_object <<EOF
+ok=yes
+action=delete
+pool=${name}
+removed=yes
+EOF
+}
+
+fpm_pool_validate() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool validate <name>"
+    name="$1"
+    resolve_pool_available "${name}" >/dev/null 2>&1 || die "Pool not found in available dir: ${name}"
+    fpm_test
+}
+
+fpm_pool_show() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool show <name>"
+    name="$1"
+
+    avail="no"
+    active="no"
+    available_path="-"
+    active_path="-"
+
+    if resolve_pool_available "${name}" >/dev/null 2>&1; then
+        avail="yes"
+        available_path="$(resolve_pool_available "${name}")"
+    fi
+
+    if resolve_pool_active "${name}" >/dev/null 2>&1; then
+        active="yes"
+        active_path="$(resolve_pool_active "${name}")"
+    fi
+
+    emit_object <<EOF
+pool=${name}
+available=${avail}
+active=${active}
+available_path=${available_path}
+active_path=${active_path}
+EOF
+}
+
+handle_fpm() {
+    [ $# -gt 0 ] || { fpm_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            fpm_usage
+            ;;
+        status)
+            shift
+            fpm_status "$@"
+            ;;
+        test)
+            shift
+            fpm_test "$@"
+            ;;
+        configtest)
+            shift
+            fpm_test "$@"
+            ;;
+        reload)
+            shift
+            fpm_reload "$@"
+            ;;
+        pool)
+            shift
+            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|render|create|generate|import|enable|disable|delete|validate|show> ..."
+            case "$1" in
+                help|--help|-h)
+                    fpm_usage
+                    ;;
+                list)
+                    shift
+                    fpm_pool_list "$@"
+                    ;;
+                render)
+                    shift
+                    fpm_pool_render "$@"
+                    ;;
+                create)
+                    shift
+                    fpm_pool_create "$@"
+                    ;;
+                generate)
+                    shift
+                    fpm_pool_generate "$@"
+                    ;;
+                import)
+                    shift
+                    fpm_pool_import "$@"
+                    ;;
+                enable)
+                    shift
+                    fpm_pool_enable "$@"
+                    ;;
+                disable)
+                    shift
+                    fpm_pool_disable "$@"
+                    ;;
+                delete)
+                    shift
+                    fpm_pool_delete "$@"
+                    ;;
+                validate)
+                    shift
+                    fpm_pool_validate "$@"
+                    ;;
+                show)
+                    shift
+                    fpm_pool_show "$@"
+                    ;;
+                *)
+                    die "Unknown fpm pool subcommand: $1"
+                    ;;
+            esac
+            ;;
+        *)
+            die "Unknown fpm subcommand: $1"
+            ;;
+    esac
+}
+
+ini_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} ini <subcommand> [args]
+
+Subcommands:
+  show                 Show php ini information
+  get <key>            Read a single ini value
+  scan                 Show additional ini scan directory
+  loaded               Show loaded php.ini path
+  help                 Show this help
+
+Examples:
+  ${PROG} ini show
+  ${PROG} ini get memory_limit
+  ${PROG} ini get opcache.enable
+  ${PROG} ini scan
+  ${PROG} ini loaded
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=ini
+usage=${PROG} ini <subcommand> [args]
+subcommands=show,get,scan,loaded,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ini_show() {
+    if [ "${OUTPUT_FORMAT}" = "text" ]; then
+        "${PHP_BIN}" --ini
+        return 0
+    fi
+
+    loaded_ini="$(php_loaded_ini)"
+    scan_dir="$(php_ini_scan_dir)"
+    parsed_files="$(php_parsed_ini_files | paste -sd ',' -)"
+    parsed_count="$(php_parsed_ini_files | awk 'NF { c++ } END { print c+0 }')"
+
+    emit_object <<EOF
+loaded_ini=${loaded_ini}
+scan_dir=${scan_dir}
+parsed_files_count=${parsed_count}
+parsed_files=${parsed_files}
+EOF
+}
+
+ini_get() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ini get <key>"
+    key="$1"
+    value="$("${PHP_BIN}" -r 'echo ini_get($argv[1]), PHP_EOL;' "${key}" 2>/dev/null || true)"
+
+    emit_object <<EOF
+key=${key}
+value=${value}
+EOF
+}
+
+ini_scan() {
+    emit_object <<EOF
+scan_dir=$(php_ini_scan_dir)
+EOF
+}
+
+ini_loaded() {
+    emit_object <<EOF
+loaded_ini=$(php_loaded_ini)
+EOF
+}
+
+handle_ini() {
+    [ $# -gt 0 ] || { ini_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            ini_usage
+            ;;
+        show)
+            shift
+            ini_show "$@"
+            ;;
+        get)
+            shift
+            ini_get "$@"
+            ;;
+        scan)
+            shift
+            ini_scan "$@"
+            ;;
+        loaded)
+            shift
+            ini_loaded "$@"
+            ;;
+        *)
+            die "Unknown ini subcommand: $1"
+            ;;
+    esac
+}
+
+status_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} status
+
+Show runtime status.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=status
+usage=${PROG} status
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+health_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} health
+
+Show runtime health.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=health
+usage=${PROG} health
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+metrics_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} metrics
+
+Show metrics.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=metrics
+usage=${PROG} metrics
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+serve_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} serve [--listen host:port]
+
+Serve /healthz, /readyz, /status and /metrics over HTTP.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=serve
+usage=${PROG} serve [--listen host:port]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+serve_http() {
+    listen="${PHPCTL_SERVE_LISTEN}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --listen)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --listen"
+                listen="$1"
+                shift
+                ;;
+            -h|--help)
+                serve_usage
+                return 0
+                ;;
+            *)
+                die "Unknown serve option: $1"
+                ;;
+        esac
+    done
+
+    cmd_exists "${NC_BIN}" || die "nc binary not found"
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'serve_listen: %s\n' "${listen}"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+listen=${listen}
+mode=single-file
+transport=nc
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    while :; do
+        req_file="$(mktemp_file)"
+        body_file="$(mktemp_file)"
+        response_file="$(mktemp_file)"
+
+        if "${NC_BIN}" -l -p "${listen##*:}" > "${req_file}" 2>/dev/null; then
+            :
+        else
+            rm -f "${req_file}" "${body_file}" "${response_file}"
+            die "Unable to bind serve listener"
+        fi
+
+        request_line="$(head -n1 "${req_file}" 2>/dev/null || true)"
+        path="$(printf '%s' "${request_line}" | awk '{print $2}')"
+
+        status_line="404 Not Found"
+        content_type="application/json"
+
+        case "${path}" in
+            /healthz|/readyz)
+                if "${0}" --output json health > "${body_file}" 2>/dev/null; then
+                    status_line="200 OK"
+                else
+                    printf '{"ok":false}\n' > "${body_file}"
+                    status_line="503 Service Unavailable"
+                fi
+                ;;
+            /status)
+                "${0}" --output json status > "${body_file}"
+                status_line="200 OK"
+                ;;
+            /metrics)
+                "${0}" --output text metrics > "${body_file}"
+                status_line="200 OK"
+                content_type="text/plain; version=0.0.4"
+                ;;
+            *)
+                printf '{"ok":false,"error":"not found"}\n' > "${body_file}"
+                ;;
+        esac
+
+        body_len="$(wc -c < "${body_file}" | tr -d '[:space:]')"
+        {
+            printf 'HTTP/1.1 %s\r\n' "${status_line}"
+            printf 'Content-Type: %s\r\n' "${content_type}"
+            printf 'Content-Length: %s\r\n' "${body_len}"
+            printf 'Connection: close\r\n'
+            printf '\r\n'
+            cat "${body_file}"
+        } > "${response_file}"
+
+        cat "${response_file}" | "${NC_BIN}" -l -p "${listen##*:}" >/dev/null 2>&1 || true
+
+        rm -f "${req_file}" "${body_file}" "${response_file}"
+    done
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --output)
+            shift
+            [ $# -gt 0 ] || die "Missing value for --output"
+            case "$1" in
+                text|json|tsv)
+                    OUTPUT_FORMAT="$1"
+                    ;;
+                *)
+                    die "Unsupported output format: $1"
+                    ;;
+            esac
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+case "${1:-help}" in
+    help|--help|-h)
+        usage
+        ;;
+    version)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            case "${OUTPUT_FORMAT}" in
+                text)
+                    cat <<EOF
+Usage:
+  ${PROG} version
+
+Show ${PROG} version.
+EOF
+                    ;;
+                json|tsv)
+                    emit_object <<EOF
+section=version
+usage=${PROG} version
+EOF
+                    ;;
+                *)
+                    die "Unsupported output format: ${OUTPUT_FORMAT}"
+                    ;;
+            esac
+        else
+            show_version
+        fi
+        ;;
+    info)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            case "${OUTPUT_FORMAT}" in
+                text)
+                    cat <<EOF
+Usage:
+  ${PROG} info
+
+Show basic PHP runtime information.
+EOF
+                    ;;
+                json|tsv)
+                    emit_object <<EOF
+section=info
+usage=${PROG} info
+EOF
+                    ;;
+                *)
+                    die "Unsupported output format: ${OUTPUT_FORMAT}"
+                    ;;
+            esac
+        else
+            show_info
+        fi
+        ;;
+    paths)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            case "${OUTPUT_FORMAT}" in
+                text)
+                    cat <<EOF
+Usage:
+  ${PROG} paths
+
+Show important filesystem paths used by PHP, extensions and FPM.
+EOF
+                    ;;
+                json|tsv)
+                    emit_object <<EOF
+section=paths
+usage=${PROG} paths
+EOF
+                    ;;
+                *)
+                    die "Unsupported output format: ${OUTPUT_FORMAT}"
+                    ;;
+            esac
+        else
+            show_paths
+        fi
+        ;;
+    doctor)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            case "${OUTPUT_FORMAT}" in
+                text)
+                    cat <<EOF
+Usage:
+  ${PROG} doctor
+
+Run general diagnostics for PHP runtime, ini, extensions and php-fpm.
+EOF
+                    ;;
+                json|tsv)
+                    emit_object <<EOF
+section=doctor
+usage=${PROG} doctor
+EOF
+                    ;;
+                *)
+                    die "Unsupported output format: ${OUTPUT_FORMAT}"
+                    ;;
+            esac
+        else
+            show_doctor
+        fi
+        ;;
+    self-test)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            case "${OUTPUT_FORMAT}" in
+                text)
+                    cat <<EOF
+Usage:
+  ${PROG} self-test
+
+Run a quick operational test of PHP CLI, modules and php-fpm config.
+EOF
+                    ;;
+                json|tsv)
+                    emit_object <<EOF
+section=self-test
+usage=${PROG} self-test
+EOF
+                    ;;
+                *)
+                    die "Unsupported output format: ${OUTPUT_FORMAT}"
+                    ;;
+            esac
+        else
+            show_self_test
+        fi
+        ;;
+    status)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            status_usage
+        else
+            show_status
+        fi
+        ;;
+    health)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            health_usage
+        else
+            show_health
+        fi
+        ;;
+    metrics)
+        shift
+        if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+            metrics_usage
+        else
+            show_metrics
+        fi
+        ;;
+    serve)
+        shift
+        serve_http "$@"
+        ;;
+    ext)
+        shift
+        handle_ext "$@"
+        ;;
+    fpm)
+        shift
+        handle_fpm "$@"
+        ;;
+    ini)
+        shift
+        handle_ini "$@"
+        ;;
+    *)
+        usage
+        die "Unknown command: $1"
+        ;;
+esac

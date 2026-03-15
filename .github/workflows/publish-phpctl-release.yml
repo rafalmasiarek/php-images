@@ -1,0 +1,262 @@
+name: publish-phpctl-release
+
+on:
+    push:
+        branches:
+            - main
+        paths:
+            - phpctl
+            - CHANGELOG-phpctl.md
+    workflow_dispatch:
+
+permissions:
+    contents: write
+
+concurrency:
+    group: publish-phpctl-release-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    publish:
+        name: Publish phpctl release
+        runs-on: ubuntu-latest
+
+        env:
+            PHPCTL_FILE: phpctl
+            PHPCTL_CHANGELOG_FILE: CHANGELOG-phpctl.md
+            TEST_IMAGE: php:cli-alpine
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Ensure release files exist
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  test -f "${PHPCTL_FILE}" || {
+                    echo "Missing ${PHPCTL_FILE}"
+                    exit 1
+                  }
+
+                  test -f "${PHPCTL_CHANGELOG_FILE}" || {
+                    echo "Missing ${PHPCTL_CHANGELOG_FILE}"
+                    exit 1
+                  }
+
+            - name: Read phpctl version
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  VERSION_FILE="$(sed -n 's/^VERSION="\([^"]*\)"$/\1/p' "${PHPCTL_FILE}" | head -n1)"
+
+                  if [[ -z "${VERSION_FILE}" ]]; then
+                    echo "Unable to read VERSION from ${PHPCTL_FILE}"
+                    exit 1
+                  fi
+
+                  echo "VERSION=${VERSION_FILE}" >> "${GITHUB_ENV}"
+                  echo "RELEASE_TAG=phpctl-v${VERSION_FILE}" >> "${GITHUB_ENV}"
+                  echo "RELEASE_NAME=phpctl ${VERSION_FILE}" >> "${GITHUB_ENV}"
+
+            - name: Skip if release already exists
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+                    echo "Release already exists: ${RELEASE_TAG}"
+                    echo "SKIP_RELEASE=yes" >> "${GITHUB_ENV}"
+                  else
+                    echo "SKIP_RELEASE=no" >> "${GITHUB_ENV}"
+                  fi
+
+            - name: Stop if release already exists
+              if: env.SKIP_RELEASE == 'yes'
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  exit 0
+
+            - name: Make phpctl executable
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  chmod +x "${PHPCTL_FILE}"
+
+            - name: Pull smoke test image
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  docker pull "${TEST_IMAGE}"
+
+            - name: Smoke test 1 - version matches release
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+                      VERSION_OUTPUT="$(./phpctl version)"
+                      echo "phpctl version output: ${VERSION_OUTPUT}"
+                      case "${VERSION_OUTPUT}" in
+                        *"v'"${VERSION}"'"*) ;;
+                        *)
+                          echo "Expected phpctl version output to contain v'"${VERSION}"'"
+                          exit 1
+                          ;;
+                      esac
+                    '
+
+            - name: Smoke test 2 - help and output formats
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      ./phpctl help >/tmp/phpctl-help.txt
+                      ./phpctl ext --help >/tmp/phpctl-ext-help.txt
+                      ./phpctl fpm --help >/tmp/phpctl-fpm-help.txt
+                      ./phpctl ini --help >/tmp/phpctl-ini-help.txt
+                      ./phpctl --output json version >/tmp/phpctl-version.json
+                      ./phpctl --output json help >/tmp/phpctl-help.json || true
+                      ./phpctl --output tsv version >/tmp/phpctl-version.tsv
+
+                      echo "--- phpctl help ---"
+                      head -n 20 /tmp/phpctl-help.txt || true
+                      echo "--- phpctl version json ---"
+                      cat /tmp/phpctl-version.json
+                      echo "--- phpctl version tsv ---"
+                      cat /tmp/phpctl-version.tsv
+                    '
+
+            - name: Smoke test 3 - pool rendering and generation
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      ./phpctl fpm pool render smoke \
+                        -p ENABLE_METRICS=true \
+                        -p STATUS_PATH=/fpm-status-smoke \
+                        > /tmp/rendered-pool.conf
+
+                      ./phpctl fpm pool generate smoke \
+                        --output-file /tmp/generated-pool.conf \
+                        -p ENABLE_METRICS=true \
+                        -p STATUS_PATH=/fpm-status-smoke
+
+                      echo "--- rendered pool ---"
+                      cat /tmp/rendered-pool.conf
+                      echo "--- generated pool ---"
+                      cat /tmp/generated-pool.conf
+
+                      grep -q "pm.status_path = /fpm-status-smoke" /tmp/generated-pool.conf
+                    '
+
+            - name: Smoke test 4 - extension detection
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  docker run --rm \
+                    -v "$PWD:/work" \
+                    -w /work \
+                    "${TEST_IMAGE}" \
+                    sh -lc '
+                      set -eu
+                      chmod +x ./phpctl
+
+                      echo "--- detect gd ---"
+                      ./phpctl ext detect gd || true
+
+                      echo "--- detect redis ---"
+                      ./phpctl ext detect redis || true
+                    '
+
+            - name: Extract release notes from changelog
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  NOTES_FILE="$(mktemp)"
+                  awk '
+                    BEGIN { capture=0 }
+                    $0 ~ "^## " ver " - " { capture=1; print; next }
+                    $0 ~ "^## " && capture==1 { exit }
+                    capture==1 { print }
+                  ' ver="${VERSION}" "${PHPCTL_CHANGELOG_FILE}" > "${NOTES_FILE}"
+
+                  if [ ! -s "${NOTES_FILE}" ]; then
+                    echo "Unable to find changelog section for version ${VERSION}"
+                    exit 1
+                  fi
+
+                  echo "--- release notes ---"
+                  cat "${NOTES_FILE}"
+
+                  {
+                    echo 'RELEASE_NOTES<<EOF'
+                    cat "${NOTES_FILE}"
+                    echo 'EOF'
+                  } >> "${GITHUB_ENV}"
+
+            - name: Prepare release assets
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  mkdir -p .release
+                  cp "${PHPCTL_FILE}" ".release/phpctl"
+                  chmod +x ".release/phpctl"
+
+                  sha256sum ".release/phpctl" > ".release/phpctl.sha256"
+
+                  echo "--- phpctl.sha256 ---"
+                  cat ".release/phpctl.sha256"
+
+            - name: Create GitHub release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+
+                  gh release create "${RELEASE_TAG}" \
+                    ".release/phpctl#phpctl" \
+                    ".release/phpctl.sha256#phpctl.sha256" \
+                    --title "${RELEASE_NAME}" \
+                    --notes "${RELEASE_NOTES}"
+
+            - name: Verify created release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  gh release view "${RELEASE_TAG}" --json tagName,name,assets
