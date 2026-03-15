@@ -77,6 +77,7 @@ jobs:
               "variant": variant,
               "context": f"versions/{mm}/{variant}",
               "dockerfile": f"versions/{mm}/{variant}/Dockerfile",
+              "pecl_file": f"versions/{mm}/{variant}/pecl.txt",
               "tag": f"local/php-{mm}-{variant}:report"
             })
 
@@ -162,40 +163,56 @@ jobs:
         run: |
           set -euo pipefail
 
-          DOCKERFILE_ALPINE_FULL="$(
-            awk '
-              BEGIN { IGNORECASE=1 }
-              /^FROM[[:space:]]+/ {
-                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-              }
-            ' "${{ matrix.dockerfile }}" || true
-          )"
-          DOCKERFILE_ALPINE_FULL="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | tr -d '\r\n')"
+          python3 - <<'PY' > /tmp/alpine_versions.env
+          import json
+          import re
+          import subprocess
+          from pathlib import Path
 
-          DOCKERFILE_ALPINE_MINOR=""
-          if [ -n "$DOCKERFILE_ALPINE_FULL" ]; then
-            DOCKERFILE_ALPINE_MINOR="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | cut -d. -f1,2)"
-          fi
+          dockerfile_path = Path("${{ matrix.dockerfile }}")
+          content = dockerfile_path.read_text(encoding="utf-8", errors="replace")
 
-          IMAGE_ALPINE_FULL="$(
-            docker run --rm --entrypoint /bin/sh "${{ matrix.tag }}" -lc 'cat /etc/alpine-release' || true
-          )"
-          IMAGE_ALPINE_FULL="$(printf '%s' "$IMAGE_ALPINE_FULL" | tr -d '\r\n')"
+          dockerfile_full = ""
+          for line in content.splitlines():
+              if not re.match(r"^\s*FROM\s+", line, flags=re.IGNORECASE):
+                  continue
+              m = re.search(r"alpine:([0-9]+\.[0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
+              if m:
+                  dockerfile_full = m.group(1)
+                  break
+              m = re.search(r"alpine:([0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
+              if m:
+                  dockerfile_full = m.group(1)
+                  break
+              m = re.search(r"alpine([0-9]+\.[0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
+              if m:
+                  dockerfile_full = m.group(1)
+                  break
+              m = re.search(r"alpine([0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
+              if m:
+                  dockerfile_full = m.group(1)
+                  break
 
-          IMAGE_ALPINE_MINOR=""
-          if [ -n "$IMAGE_ALPINE_FULL" ]; then
-            IMAGE_ALPINE_MINOR="$(printf '%s' "$IMAGE_ALPINE_FULL" | cut -d. -f1,2)"
-          fi
+          dockerfile_minor = ".".join(dockerfile_full.split(".")[:2]) if dockerfile_full else ""
 
-          {
-            printf 'dockerfile_full=%s\n' "$DOCKERFILE_ALPINE_FULL"
-            printf 'dockerfile_minor=%s\n' "$DOCKERFILE_ALPINE_MINOR"
-            printf 'image_full=%s\n' "$IMAGE_ALPINE_FULL"
-            printf 'image_minor=%s\n' "$IMAGE_ALPINE_MINOR"
-          } >> "$GITHUB_OUTPUT"
+          try:
+              image_full = subprocess.check_output(
+                  ["docker", "run", "--rm", "--entrypoint", "/bin/sh", "${{ matrix.tag }}", "-lc", "cat /etc/alpine-release"],
+                  text=True,
+                  stderr=subprocess.DEVNULL,
+              ).strip()
+          except Exception:
+              image_full = ""
+
+          image_minor = ".".join(image_full.split(".")[:2]) if image_full else ""
+
+          print(f"dockerfile_full={dockerfile_full}")
+          print(f"dockerfile_minor={dockerfile_minor}")
+          print(f"image_full={image_full}")
+          print(f"image_minor={image_minor}")
+          PY
+
+          cat /tmp/alpine_versions.env >> "$GITHUB_OUTPUT"
 
       - name: Select matching hotfixes
         id: hotfixes
@@ -352,6 +369,19 @@ jobs:
           echo "remaining_count=${#REMAINING_CVES[@]}" >> "$GITHUB_OUTPUT"
           echo "new_count=${#NEW_CVES[@]}" >> "$GITHUB_OUTPUT"
 
+      - name: Collect phpctl outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          img="${{ matrix.tag }}"
+
+          docker run --rm "$img" sh -lc 'phpctl version' > /tmp/phpctl-version.txt
+          docker run --rm "$img" sh -lc 'phpctl --output json info' > /tmp/phpctl-info.json
+          docker run --rm "$img" sh -lc 'phpctl --output json ini show' > /tmp/phpctl-ini-show.json
+          docker run --rm "$img" sh -lc 'phpctl --output json ext list' > /tmp/phpctl-ext-list.json
+          docker run --rm "$img" sh -lc 'phpctl --output json ext so-list' > /tmp/phpctl-ext-so-list.json
+
       - name: Generate PHP and security report
         id: report
         shell: bash
@@ -363,16 +393,20 @@ jobs:
           REM_FIXED_COUNT: ${{ steps.remediation.outputs.fixed_count }}
           REM_REMAINING_COUNT: ${{ steps.remediation.outputs.remaining_count }}
           REM_NEW_COUNT: ${{ steps.remediation.outputs.new_count }}
+          PHP_MM: ${{ matrix.mm }}
+          PHP_VARIANT: ${{ matrix.variant }}
+          IMAGE_TAG: ${{ matrix.tag }}
+          PECL_FILE_PATH: ${{ matrix.pecl_file }}
         run: |
           set -euo pipefail
-          img="${{ matrix.tag }}"
           out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
 
-          python3 - <<'PY' > /tmp/security-report.md
+          python3 - <<'PY' > "$out"
           import json
           import os
+          from pathlib import Path
 
-          def load(path):
+          def load_json(path):
               with open(path, "r", encoding="utf-8") as fh:
                   return json.load(fh)
 
@@ -413,8 +447,33 @@ jobs:
               rows.sort(key=lambda r: (severity_rank.get(r["severity"], 9), r["pkg"], r["id"]))
               return rows
 
-          pre = load("trivy-results-pre.json")
-          post = load("trivy-results-post.json")
+          def load_expected_pecl(path):
+              items = []
+              p = Path(path)
+              if not p.exists():
+                  return items
+              for raw in p.read_text(encoding="utf-8").splitlines():
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  items.append(line)
+              return items
+
+          def yesno_to_emoji(value):
+              return "✅" if value else "❌"
+
+          def md_escape(text):
+              return str(text).replace("|", "\\|")
+
+          pre = load_json("trivy-results-pre.json")
+          post = load_json("trivy-results-post.json")
+          info = load_json("/tmp/phpctl-info.json")
+          ini_show = load_json("/tmp/phpctl-ini-show.json")
+          ext_list = load_json("/tmp/phpctl-ext-list.json")
+          so_list = load_json("/tmp/phpctl-ext-so-list.json")
+
+          phpctl_version = Path("/tmp/phpctl-version.txt").read_text(encoding="utf-8").strip()
+          expected = load_expected_pecl(os.environ["PECL_FILE_PATH"])
 
           pre_counts = counts(pre)
           post_counts = counts(post)
@@ -428,6 +487,47 @@ jobs:
           remaining_count = os.environ.get("REM_REMAINING_COUNT", "0")
           new_count = os.environ.get("REM_NEW_COUNT", "0")
 
+          actual_map = {}
+          for row in ext_list:
+              name = str(row.get("name") or "").strip()
+              if not name:
+                  continue
+              actual_map[name] = {
+                  "available": bool(row.get("available")),
+                  "active": bool(row.get("active")),
+                  "loaded": bool(row.get("loaded")),
+                  "version": str(row.get("version") or "-"),
+                  "available_ini": str(row.get("available_ini") or "-"),
+                  "active_ini": str(row.get("active_ini") or "-"),
+              }
+
+          ext_names = sorted(set(expected) | set(actual_map.keys()), key=lambda s: s.lower())
+
+          expected_missing = []
+          unexpected_installed = []
+          active_not_loaded = []
+
+          for name in ext_names:
+              expected_flag = name in expected
+              actual = actual_map.get(name, {})
+              available = bool(actual.get("available"))
+              active = bool(actual.get("active"))
+              loaded = bool(actual.get("loaded"))
+
+              if expected_flag and not available:
+                  expected_missing.append(name)
+              if (not expected_flag) and available:
+                  unexpected_installed.append(name)
+              if active and not loaded:
+                  active_not_loaded.append(name)
+
+          print(f"<!-- php-report:{os.environ['PHP_MM']}:{os.environ['PHP_VARIANT']} -->")
+          print(f"## PHP report: `{os.environ['PHP_MM']}` / `{os.environ['PHP_VARIANT']}`")
+          print()
+          print(f"**Image (local):** `{os.environ['IMAGE_TAG']}`")
+          print()
+          print(f"**phpctl:** `{phpctl_version}`")
+          print()
           print("### Security summary")
           print()
           print("| Stage | Critical | High | Medium |")
@@ -469,61 +569,86 @@ jobs:
                   installed = row["installed"] if row["installed"] else "-"
                   pkg = row["pkg"] if row["pkg"] else "-"
                   vid = row["id"] if row["id"] else "-"
-                  print(f"| `{vid}` | `{row['severity']}` | `{pkg}` | `{installed}` | `{fixed}` |")
+                  print(f"| `{md_escape(vid)}` | `{md_escape(row['severity'])}` | `{md_escape(pkg)}` | `{md_escape(installed)}` | `{md_escape(fixed)}` |")
           else:
               print("No CRITICAL/HIGH/MEDIUM CVEs detected after rebuild.")
-          PY
 
-          {
-            echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
-            echo "## PHP report: \`${{ matrix.mm }}\` / \`${{ matrix.variant }}\`"
-            echo
-            echo "**Image (local):** \`$img\`"
-            echo
-            cat /tmp/security-report.md
-            echo
-            echo "### php -v"
-            echo '```'
-            docker run --rm "$img" sh -lc 'php -v'
-            echo '```'
-            echo
-            echo "### php --ini"
-            echo '```'
-            docker run --rm "$img" sh -lc 'php --ini'
-            echo '```'
-            echo
-            echo "### Extensions (php -m | sort)"
-            echo '```'
-            docker run --rm "$img" sh -lc 'php -m | sort'
-            echo '```'
-            echo
-            echo "### PECL packages (pecl list)"
-            echo '```'
-            docker run --rm "$img" sh -lc 'pecl list 2>/dev/null || true'
-            echo '```'
-            echo
-            echo "### Per-extension versions (best effort)"
-            echo '```'
-            docker run --rm "$img" sh -lc 'php -r '"'"'
-              $exts = get_loaded_extensions();
-              sort($exts);
-              foreach ($exts as $e) {
-                $v = phpversion($e);
-                if ($v === false || $v === null || $v === "") $v = "(built-in/unknown)";
-                echo str_pad($e, 22) . " " . $v . PHP_EOL;
-              }
-            '"'"''
-            echo '```'
-            echo
-            echo "### extension_dir and .so listing"
-            echo '```'
-            docker run --rm "$img" sh -lc '
-              extdir="$(php -i | awk -F" => " "/^extension_dir/ {print \$2}" | head -n1)";
-              echo "extension_dir=$extdir";
-              ls -la "$extdir" || true
-            '
-            echo '```'
-          } > "$out"
+          print()
+          print("### Runtime info")
+          print()
+          print("| Key | Value |")
+          print("|---|---|")
+          print(f"| PHP version | `{md_escape(info.get('php_version', '-'))}` |")
+          print(f"| PHP SAPI | `{md_escape(info.get('php_sapi', '-'))}` |")
+          print(f"| PHP binary | `{md_escape(info.get('php_bin', '-'))}` |")
+          print(f"| PHP-FPM binary | `{md_escape(info.get('php_fpm_bin', '-'))}` |")
+          print(f"| Loaded php.ini | `{md_escape(info.get('loaded_ini', '-'))}` |")
+          print(f"| INI scan dir | `{md_escape(info.get('ini_scan_dir', '-'))}` |")
+          print(f"| Extension dir | `{md_escape(info.get('extension_dir', '-'))}` |")
+          print(f"| Parsed ini files | `{md_escape(ini_show.get('parsed_files_count', '0'))}` |")
+
+          print()
+          print("### Extension status")
+          print()
+          print("| Extension | Expected | Installed | Enabled | Loaded | Version | Available ini | Active ini |")
+          print("|---|---|---|---|---|---|---|---|")
+          for name in ext_names:
+              actual = actual_map.get(name, {})
+              expected_flag = name in expected
+              installed = bool(actual.get("available"))
+              active = bool(actual.get("active"))
+              loaded = bool(actual.get("loaded"))
+              version = actual.get("version", "-")
+              available_ini = actual.get("available_ini", "-")
+              active_ini = actual.get("active_ini", "-")
+              print(
+                  f"| `{md_escape(name)}` | {yesno_to_emoji(expected_flag)} | {yesno_to_emoji(installed)} | "
+                  f"{yesno_to_emoji(active)} | {yesno_to_emoji(loaded)} | `{md_escape(version)}` | "
+                  f"`{md_escape(available_ini)}` | `{md_escape(active_ini)}` |"
+              )
+
+          print()
+          print("### Extension summary")
+          print()
+          print(f"- Expected extensions from `pecl.txt`: `{len(expected)}`")
+          print(f"- Discovered extensions from image: `{len(actual_map)}`")
+          print(f"- Expected but not installed: `{len(expected_missing)}`")
+          print(f"- Installed but not expected: `{len(unexpected_installed)}`")
+          print(f"- Enabled but not loaded: `{len(active_not_loaded)}`")
+
+          if expected_missing:
+              shown = ", ".join(f"`{md_escape(x)}`" for x in expected_missing[:30])
+              print(f"- Missing expected extensions: {shown}")
+          else:
+              print("- Missing expected extensions: none")
+
+          if unexpected_installed:
+              shown = ", ".join(f"`{md_escape(x)}`" for x in unexpected_installed[:30])
+              print(f"- Unexpected installed extensions: {shown}")
+          else:
+              print("- Unexpected installed extensions: none")
+
+          if active_not_loaded:
+              shown = ", ".join(f"`{md_escape(x)}`" for x in active_not_loaded[:30])
+              print(f"- Enabled but not loaded: {shown}")
+          else:
+              print("- Enabled but not loaded: none")
+
+          print()
+          print("### Shared objects in extension_dir")
+          print()
+
+          if so_list:
+              print("| Module | Path | Size (bytes) |")
+              print("|---|---|---:|")
+              for row in so_list:
+                  name = str(row.get("name") or "-")
+                  path = str(row.get("path") or "-")
+                  size = str(row.get("size") or "-")
+                  print(f"| `{md_escape(name)}` | `{md_escape(path)}` | `{md_escape(size)}` |")
+          else:
+              print("No `.so` files found in extension_dir.")
+          PY
 
           echo "path=$out" >> "$GITHUB_OUTPUT"
 
