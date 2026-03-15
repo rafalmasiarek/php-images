@@ -2,7 +2,7 @@
 set -eu
 
 PROG="${0##*/}"
-VERSION="0.3.1"
+VERSION="0.3.2"
 
 OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
 

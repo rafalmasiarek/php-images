@@ -1,0 +1,168 @@
+## 0.3.2 - 2026-03-15
+
+- feat: add phpctl as release (562219a) by Rafał Masiarek
+- chore(repo): refresh generated assets (d6e4c53) by github-actions[bot]
+- fix: add +x to phpctl bin (2132bb6) by Rafał Masiarek
+- feat: add phpctl v2-alpha and use them on builds (c910496) by Rafał Masiarek
+- chore(repo): refresh generated assets (b20a66d) by github-actions[bot]
+- chore(repo): refresh generated assets (728ac78) by github-actions[bot]
+- chore(repo): refresh generated assets (ce5ede0) by github-actions[bot]
+- Create phpctl (4287f9c) by Rafał Masiarek
+- chore(repo): refresh generated assets (ab0f951) by github-actions[bot]
+- fix(hotfix): add Alpine hotfix scripts for CVE-2026-2006 and CVE-2026-2007 (PostgreSQL libs) [#29](https://github.com/rafalmasiarek/php-images/issues/29) [#30](https://github.com/rafalmasiarek/php-images/issues/30) (2f94381) by Rafał Masiarek
+- chore(repo): refresh generated assets (5d4a048) by github-actions[bot]
+- Update gen-web-catalog.py (dd4047c) by Rafał Masiarek
+- Update gen-readme.py (706895d) by Rafał Masiarek
+- Update build-and-test-new-php-versions.yml (5f6c824) by Rafał Masiarek
+- Update discover-and-release-new-php.yml (bb01474) by Rafał Masiarek
+- chore(repo): refresh generated assets (228d800) by github-actions[bot]
+- Update build.yml (703e7c5) by Rafał Masiarek
+- chore(repo): refresh generated assets (b627509) by github-actions[bot]
+- feat: rebuild shields.io cache in build.yml (ece5bef) by Rafał Masiarek
+- chore(repo): refresh generated assets (d0166e3) by github-actions[bot]
+- Update build.yml (9b18e21) by Rafał Masiarek
+- chore(repo): refresh generated assets (fdbfcce) by github-actions[bot]
+- Update build.yml (8a435ad) by Rafał Masiarek
+- chore(repo): refresh generated assets (ca23e52) by github-actions[bot]
+- fix(ci): indent affected variants list in remediation status (62c43f5) by Rafał Masiarek
+- chore(repo): refresh generated assets (bed968d) by github-actions[bot]
+- feat(ci): sync aggregated Trivy CVE issues and export hotfix metadata (92d1e34) by Rafał Masiarek
+- chore(deps): update php docker tag to v8.5.4 (3531132) by renovate[bot]
+- Update build-and-test-new-php-versions.yml (4c1e572) by Rafał Masiarek
+- Update build-and-test-new-php-versions.yml (bd1aabe) by Rafał Masiarek
+- fix: remove load json to env in build-and-test-new-php-versions.yml (3babf1c) by Rafał Masiarek
+- chore(repo): refresh generated assets (d1fcea5) by github-actions[bot]
+- chore(repo): refresh generated assets (d548aef) by github-actions[bot]
+- chore(repo): refresh generated assets (311a05f) by github-actions[bot]
+- chore(deps): update dependency ruby to v3.4.9 (cfa93a8) by renovate[bot]
+- chore(repo): refresh generated assets (0409d96) by github-actions[bot]
+- chore(repo): refresh generated assets (ed23194) by github-actions[bot]
+- feat: add php end-of-life warning and badges (ca7077f) by Rafał Masiarek
+- chore(repo): refresh generated assets (bbaa241) by github-actions[bot]
+- feat: add support to monitoring versions EOL (fb5b156) by Rafał Masiarek
+- chore(repo): refresh generated assets (be8b3a2) by github-actions[bot]
+- Update build.yml (fd4a4ba) by Rafał Masiarek
+- chore(repo): refresh generated assets (20b3e65) by github-actions[bot]
+- chore(repo): refresh generated assets (7f6bd8e) by github-actions[bot]
+- fix shell in candidate selctor (099f55c) by Rafał Masiarek
+- fix problem with gh outputs on actions (23f9680) by Rafał Masiarek
+- fix build (5f831c4) by Rafał Masiarek
+- feat: insert entrypoint and refactor build to better regexp hotfixes (62f9d55) by Rafał Masiarek
+- chore(repo): refresh generated assets (ce34a85) by github-actions[bot]
+- feat: add hotfixes patches (d608ef3) by Rafał Masiarek
+- chore(repo): refresh generated assets (a77af1f) by github-actions[bot]
+- feat: refactor github ci (7780845) by Rafał Masiarek
+- chore(web): update badges and reports (76ba68f) by github-actions[bot]
+- chore(web): update badges and reports (ec73b35) by github-actions[bot]
+- chore(web): update badges and reports (4025eb4) by github-actions[bot]
+- chore(deps): update aquasecurity/trivy-action action to v0.35.0 (4139d74) by renovate[bot]
+- chore(web): update badges and reports (34af771) by github-actions[bot]
+- chore(web): update badges and reports (d40c576) by github-actions[bot]
+- chore(deps): update ci tooling (f3bf52a) by renovate[bot]
+- chore(web): update badges and reports (2f261c1) by github-actions[bot]
+- chore(web): update badges and reports (6beb674) by github-actions[bot]
+- chore(web): update badges and reports (ab90e2b) by github-actions[bot]
+- chore(deps): update ci tooling (2795c62) by renovate[bot]
+- chore(deps): update docker/dockerfile docker tag to v1.22 (e6412a4) by renovate[bot]
+- chore(readme): regenerate (558aeb0) by github-actions
+- chore(web): update badges and reports (de90328) by github-actions[bot]
+- Create build-and-test-new-php-versions.yml (aa7ed94) by Rafał Masiarek
+- Update Dockerfile (fcc42d0) by Rafał Masiarek
+- Update Dockerfile php 8.5 (f9010fb) by Rafał Masiarek
+- chore(readme): regenerate (8665230) by github-actions
+- chore(readme): regenerate (2ca549e) by github-actions
+- chore(versions): add PHP 8.5 (8f884ee) by rafalmasiarek
+- chore(web): update badges and reports (657565d) by github-actions[bot]
+- chore(web): update badges and reports (ea327b2) by github-actions[bot]
+- Remove imap extension from Dockerfile (2570083) by Rafał Masiarek
+- Remove imap configuration from Dockerfile (9fe76ff) by Rafał Masiarek
+- chore(readme): regenerate (4067ab6) by github-actions
+- chore(versions): add PHP 8.4 (f1018cc) by rafalmasiarek
+- chore(readme): regenerate (7272ba9) by github-actions
+- Delete versions/8.4 directory (854a0db) by Rafał Masiarek
+- Enhance PHP discovery and release workflow (b7f9083) by Rafał Masiarek
+- chore(readme): regenerate (ce6dceb) by github-actions
+- chore(web): update badges and reports (454fb5c) by github-actions[bot]
+- chore(versions): add PHP 8.4 (7805e43) by rafalmasiarek
+- Update discover-and-release-new-php.yml (f939f59) by Rafał Masiarek
+- chore(web): update badges and reports (eb5323b) by github-actions[bot]
+- Create discover-and-release-new-php.yml (e4d2a19) by Rafał Masiarek
+- chore(web): update badges and reports (824b9f7) by github-actions[bot]
+- Update index.md (f080e06) by Rafał Masiarek
+- chore(web): update badges and reports (6dbba41) by github-actions[bot]
+- Update site.css (a845738) by Rafał Masiarek
+- Update index.md (1ce46ff) by Rafał Masiarek
+- chore(web): update badges and reports (f2a989f) by github-actions[bot]
+- feat: refactor webstie (475474e) by Rafał Masiarek
+- chore(web): update badges and reports (6767dd3) by github-actions[bot]
+- Update index.md (2bba8e4) by Rafał Masiarek
+- chore(web): update badges and reports (732444d) by github-actions[bot]
+- feat: better website (cab5db1) by Rafał Masiarek
+- chore(web): update badges and reports (85b6ac1) by github-actions[bot]
+- Update index.md (7d8b60b) by Rafał Masiarek
+- Update index.md (118a404) by Rafał Masiarek
+- Create table-controls.html (5680106) by Rafał Masiarek
+- chore(web): update badges and reports (e61b52e) by github-actions[bot]
+- Update gen-web-catalog.py (faacca4) by Rafał Masiarek
+- Update gen-web-catalog.py (929329e) by Rafał Masiarek
+- chore(readme): regenerate (ae2f706) by github-actions
+- fix readme gen script (48440d2) by Rafał Masiarek
+- chore(web): update badges and reports (5391422) by github-actions[bot]
+- Update readme.yml (f6aa6cb) by Rafał Masiarek
+- Update build.yml (9349849) by Rafał Masiarek
+- chore(web): update badges and reports (2e80230) by github-actions[bot]
+- Update build.yml (ca4f4fc) by Rafał Masiarek
+- chore(web): update badges and reports (32ba68f) by github-actions[bot]
+- Update build.yml (93147b3) by Rafał Masiarek
+- chore(readme): regenerate (7767b6b) by github-actions
+- Update gen-readme.py (6bc1c60) by Rafał Masiarek
+- chore(readme): regenerate (92859a1) by github-actions
+- Update gen-readme.py (63dcbef) by Rafał Masiarek
+- chore(web): update badges and reports (1f68cd9) by github-actions[bot]
+- Update build.yml (b6c49d0) by Rafał Masiarek
+- chore(web): update badges and reports (d6bc25d) by github-actions[bot]
+- Update build.yml (b74ebf6) by Rafał Masiarek
+- Update build.yml (5a2a21f) by Rafał Masiarek
+- Update build.yml (dabff6a) by Rafał Masiarek
+- Update build.yml (408a0bd) by Rafał Masiarek
+- chore(web): update badges and reports (62eaf59) by github-actions[bot]
+- Update build.yml (dad3ebd) by Rafał Masiarek
+- chore(web): update badges and reports (401ea99) by github-actions[bot]
+- Update gen-web-catalog.py (23503d6) by Rafał Masiarek
+- Update gen-readme.py (3be7bef) by Rafał Masiarek
+- chore(web): update badges and reports (84c5d0f) by github-actions[bot]
+- Update build.yml (aef7925) by Rafał Masiarek
+- chore(readme): regenerate (0cf8b98) by github-actions
+- Update gen-readme.py (da12416) by Rafał Masiarek
+- Update gen-web-catalog.py (cb919cb) by Rafał Masiarek
+- Update build.yml (0057889) by Rafał Masiarek
+- Update build.yml (8d90bf8) by Rafał Masiarek
+- Update build.yml (5f1fd1b) by Rafał Masiarek
+- Update build.yml (4c5a7a5) by Rafał Masiarek
+- Update build.yml (86b67c7) by Rafał Masiarek
+- Update build.yml (5027d8c) by Rafał Masiarek
+- Update build.yml (aa03da3) by Rafał Masiarek
+- Fix template path in Trivy action configuration (e27f3f6) by Rafał Masiarek
+- chore(config): migrate config renovate.json (a838d7c) by renovate[bot]
+- feat: bump syntax docker/dockerfile 1.7 to 1.21 [ci skip] (9f836ff) by Rafał Masiarek
+- fix 88.2 to 8.2 (05fdb08) by Rafał Masiarek
+- chore(readme): regenerate (42a0631) by github-actions
+- fix renove and remove dependabot (cd16a4f) by Rafał Masiarek
+- chore(deps): bump actions/upload-artifact from 4 to 7 (2034258) by dependabot[bot]
+- chore(deps): update dependency ruby to v3.4.8 (61e9aee) by renovate[bot]
+- chore(deps): bump aquasecurity/trivy-action from 0.28.0 to 0.34.2 (4cc412f) by dependabot[bot]
+- chore(deps): bump actions/download-artifact from 4 to 8 (26b3c6b) by dependabot[bot]
+- chore(readme): regenerate (e5ec36d) by github-actions
+- refactor auto-ci (b6d1f8e) by Rafał Masiarek
+- refactor (8d6f7c2) by Rafał Masiarek
+- remove odbc (bacd2de) by Rafał Masiarek
+- chore(deps): bump actions/upload-pages-artifact from 3 to 4 (e6e51aa) by dependabot[bot]
+- chore(deps): bump actions/checkout from 4 to 6 (cfe7286) by dependabot[bot]
+- chore(readme): regenerate (2c977f6) by github-actions
+- refactoring repo (b4f64b4) by Rafał Masiarek
+- feat: add unixodbc (5b31369) by Rafał Masiarek
+- chore: try to fix unixODBC (295eca3) by Rafał Masiarek
+- chore: fix unixodbc-dev (176e9d5) by Rafał Masiarek
+- fix problems with gh actions (3d74616) by Rafał Masiarek
+- chore(readme): regenerate (948397a) by github-actions
+- inital commit with v8.2 and v8.3 (44e6634) by Rafał Masiarek
