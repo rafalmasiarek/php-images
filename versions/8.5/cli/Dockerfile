@@ -23,8 +23,8 @@ RUN set -eux; \
     openldap-dev imap-dev krb5-dev net-snmp-dev \
     rabbitmq-c-dev libssh2-dev libmemcached-dev \
     imagemagick-dev imagemagick; \
-  phpctl ext install gd --type core --jobs "$(nproc)" --configure --with-freetype --configure --with-jpeg --no-cleanup; \
-  phpctl ext install ldap --type core --jobs "$(nproc)" --no-cleanup; \
+  phpctl ext install gd --type core --jobs "$(nproc)" --configure --with-freetype --configure --with-jpeg --verbose --no-cleanup; \
+  phpctl ext install ldap --type core --jobs "$(nproc)" --verbose --no-cleanup; \
   phpctl ext install \
     bcmath bz2 calendar \
     curl exif ftp \
@@ -36,10 +36,10 @@ RUN set -eux; \
     soap sockets \
     tidy xsl zip \
     snmp \
-    --type core --jobs "$(nproc)" --no-cleanup; \
+    --type core --jobs "$(nproc)" --verbose --no-cleanup; \
   sed -e 's/#.*$//' -e 's/[[:space:]]*$//' -e 's/^[[:space:]]*//' /tmp/pecl.txt \
     | sed '/^$/d' \
-    | xargs -r phpctl ext install --no-cleanup; \
+    | xargs -r phpctl ext install --verbose --no-cleanup; \
   phpctl ext cleanup; \
   apk del .build-deps
 
