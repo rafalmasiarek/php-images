@@ -1,3 +1,8 @@
+## 0.3.5 - 2026-03-16
+
+- fix problem with dockerfile available modules path (cf45fb2) by Rafał Masiarek
+- feat: refactor api server in phpctl, fix problem in dockerfiles (d4876fc) by Rafał Masiarek
+- chore(images): bump phpctl to 0.3.4 (d728ac7) by github-actions[bot]
 ## 0.3.4 - 2026-03-15
 
 - feat: resolve problem with rebuild existing core module (9642809) by Rafał Masiarek
