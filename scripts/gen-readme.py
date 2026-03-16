@@ -13,6 +13,7 @@ REPO = os.getenv("GITHUB_REPOSITORY", "rafalmasiarek/php-images")
 GHCR_IMAGE = f"ghcr.io/{REPO.split('/')[0]}/{IMAGE_NAME}"
 SITE_BASE_URL = os.getenv("SITE_BASE_URL", "").rstrip("/")
 BADGE_VERSION = os.getenv("GITHUB_RUN_ID") or os.getenv("GITHUB_SHA", "")[:7] or "local"
+DOCS_DIR = ROOT / "docs"
 
 
 def detect_alpine(dockerfile: Path) -> str:
@@ -134,6 +135,26 @@ def php_key(value: str) -> tuple[int, ...]:
         return (0,)
 
 
+def read_doc_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def load_docs_sections() -> list[str]:
+    sections: list[str] = []
+
+    if not DOCS_DIR.exists():
+        return sections
+
+    for path in sorted(DOCS_DIR.glob("*.md")):
+        content = read_doc_file(path)
+        if content:
+            sections.append(content)
+
+    return sections
+
+
 data: dict[str, dict[str, dict[str, str]]] = {}
 php_eol_data = load_php_eol_data()
 
@@ -194,44 +215,36 @@ badges = [workflow_badge(), license_badge()]
 if SITE_BASE_URL:
     badges.extend([endpoint_badge("trivy-total"), endpoint_badge("built")])
 
-readme = "\n".join(
+docs_sections = load_docs_sections()
+
+parts = [
+    f"# {IMAGE_NAME}",
+    "",
+    "Multi-arch Alpine-based PHP images",
+    "",
+    *[badge for badge in badges if badge],
+    "",
+    "---",
+    "",
+    "## Supported images",
+    "",
+    *table,
+]
+
+for section in docs_sections:
+    parts.extend(
+        [
+            "",
+            "---",
+            "",
+            section,
+        ]
+    )
+
+parts.extend(
     [
-        f"# {IMAGE_NAME}",
-        "",
-        "Multi-arch Alpine-based PHP images",
-        "",
-        *[badge for badge in badges if badge],
         "",
         "---",
-        "",
-        "## Supported images",
-        "",
-        *table,
-        "",
-        "---",
-        "",
-        "## Pulling images",
-        "",
-        f"All images are published to `{GHCR_IMAGE}`.",
-        "",
-        "Tag scheme:",
-        "",
-        "- `<php>-<variant>` (moving)",
-        "- `<php>-<variant>-YYYY-MM-DD` (date)",
-        "- `<php>-<variant>-sha-<gitsha7>` (immutable)",
-        "",
-        "## Trivy reports",
-        "",
-        f"- HTML reports: {SITE_BASE_URL}/reports/" if SITE_BASE_URL else "- HTML reports: `/reports/`",
-        "",
-        "## Install one more extension on top of an image",
-        "",
-        "Images ship with `/usr/local/bin/php-ext-install` for PECL modules:",
-        "",
-        "```sh",
-        "php-ext-install pecl igbinary",
-        "php-ext-install pecl imagick --runtime imagemagick-dev --apk imagemagick-dev",
-        "```",
         "",
         "## License",
         "",
@@ -240,5 +253,6 @@ readme = "\n".join(
     ]
 )
 
+readme = "\n".join(parts)
 (ROOT / "README.md").write_text(readme, encoding="utf-8")
 print("README.md generated")
