@@ -2,7 +2,7 @@
 FROM php:8.5.4-cli-alpine3.23 AS builder
 
 ARG PECL_FILE=pecl.txt
-ARG PHPCTL_VERSION=0.5.6
+ARG PHPCTL_VERSION=0.3.6
 
 COPY rootfs/ /
 COPY ${PECL_FILE} /tmp/pecl.txt
