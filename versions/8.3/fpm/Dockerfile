@@ -74,7 +74,8 @@ COPY rootfs/ /
 
 RUN set -eux; \
     mkdir -p /usr/local/etc/php/conf.d /usr/local/etc/php/conf.d/available; \
-    rm -f /usr/local/etc/php/conf.d/*.ini || true; \
+    rm -f /usr/local/etc/php/conf.d/docker-php-ext-*.ini || true; \
+    rm -f /usr/local/etc/php/conf.d/zz-*.ini || true; \
     if [ -d /opt/hotfixes-selected ]; then \
     find /opt/hotfixes-selected -maxdepth 1 -type f -name '*.sh' | sort | while read -r f; do \
     echo "[hotfix] loading: $f"; \

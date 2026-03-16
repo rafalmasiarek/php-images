@@ -78,6 +78,7 @@ RUN set -eux; \
   if [ -d /opt/hotfixes-selected ]; then \
   find /opt/hotfixes-selected -maxdepth 1 -type f -name '*.sh' | sort | while read -r f; do \
   echo "[hotfix] loading: $f"; \
+  chmod +x "$f"; \
   /bin/sh "$f"; \
   done; \
   fi
