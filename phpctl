@@ -24,7 +24,7 @@
 set -eu
 
 PROG="${0##*/}"
-VERSION="0.3.5"
+VERSION="0.3.6"
 
 OUTPUT_FORMAT="${PHPCTL_OUTPUT_FORMAT:-text}"
 
@@ -55,6 +55,11 @@ PHPCTL_SERVE_LISTEN="${PHPCTL_SERVE_LISTEN:-0.0.0.0:8080}"
 PHPCTL_SERVER_LISTEN="${PHPCTL_SERVER_LISTEN:-${PHPCTL_SERVE_LISTEN}}"
 PHPCTL_CLIENT_CONF="${PHPCTL_CLIENT_CONF:-${HOME:-/root}/.phpctl/client.conf}"
 
+PHPCTL_CACHE_DIR="${PHPCTL_CACHE_DIR:-${TMPDIR:-/tmp}/phpctl}"
+PHPCTL_PECL_CHANNEL_TTL="${PHPCTL_PECL_CHANNEL_TTL:-86400}"
+PHPCTL_PECL_CHANNEL_STAMP="${PHPCTL_PECL_CHANNEL_STAMP:-${PHPCTL_CACHE_DIR}/pecl-channel-update.stamp}"
+PHPCTL_PECL_CHANNEL_FORCE_UPDATE="${PHPCTL_PECL_CHANNEL_FORCE_UPDATE:-no}"
+
 PHPCTL_REMOTE_MODE=""
 PHPCTL_REMOTE_HOST=""
 PHPCTL_REMOTE_CREDENTIALS=""
@@ -65,8 +70,73 @@ cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+log() {
+    printf '%s\n' "$*" >&2
+}
+
+detect_jobs() {
+    if cmd_exists nproc; then
+        nproc 2>/dev/null || printf '1\n'
+        return 0
+    fi
+
+    if cmd_exists getconf; then
+        getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1\n'
+        return 0
+    fi
+
+    printf '1\n'
+}
+
 mktemp_file() {
     mktemp "${TMPDIR:-/tmp}/phpctl.XXXXXX"
+}
+
+file_mtime() {
+    file="$1"
+
+    [ -e "${file}" ] || return 1
+
+    if stat -c %Y "${file}" >/dev/null 2>&1; then
+        stat -c %Y "${file}"
+        return 0
+    fi
+
+    if stat -f %m "${file}" >/dev/null 2>&1; then
+        stat -f %m "${file}"
+        return 0
+    fi
+
+    return 1
+}
+
+pecl_channel_update_once_per_ttl() {
+    cmd_exists "${PECL_BIN}" || return 0
+
+    if [ "${PHPCTL_PECL_CHANNEL_FORCE_UPDATE}" = "yes" ] || pecl_channel_update_needed; then
+        if [ "${verbose:-no}" = "yes" ]; then
+            if "${PECL_BIN}" channel-update pecl.php.net; then
+                mkdir -p "${PHPCTL_CACHE_DIR}"
+                : > "${PHPCTL_PECL_CHANNEL_STAMP}"
+            fi
+        else
+            if "${PECL_BIN}" channel-update pecl.php.net >/dev/null 2>&1; then
+                mkdir -p "${PHPCTL_CACHE_DIR}"
+                : > "${PHPCTL_PECL_CHANNEL_STAMP}"
+            fi
+        fi
+    fi
+}
+
+pecl_channel_update_once_per_ttl() {
+    cmd_exists "${PECL_BIN}" || return 0
+
+    if [ "${PHPCTL_PECL_CHANNEL_FORCE_UPDATE}" = "yes" ] || pecl_channel_update_needed; then
+        if "${PECL_BIN}" channel-update pecl.php.net >/dev/null 2>&1; then
+            mkdir -p "${PHPCTL_CACHE_DIR}"
+            : > "${PHPCTL_PECL_CHANNEL_STAMP}"
+        fi
+    fi
 }
 
 json_quote() {
@@ -92,6 +162,16 @@ die() {
     exit 1
 }
 
+normalize_ext_name() {
+    ext="$1"
+    lc="$(printf '%s' "${ext}" | tr '[:upper:]' '[:lower:]')"
+
+    case "${lc}" in
+        "zend opcache") printf '%s\n' "opcache" ;;
+        *) printf '%s\n' "${lc}" ;;
+    esac
+}
+
 php_ini_scan_dir() {
     "${PHP_BIN}" --ini 2>/dev/null | sed -n 's|^Scan for additional .ini files in: ||p' | head -n1
 }
@@ -105,30 +185,42 @@ php_extension_dir() {
 }
 
 php_loaded_extensions_list() {
-    "${PHP_BIN}" -r '
-        $a = get_loaded_extensions();
-        $b = function_exists("get_loaded_extensions") ? get_loaded_extensions(true) : [];
-        $exts = array_values(array_unique(array_merge($a, $b)));
-        sort($exts, SORT_NATURAL | SORT_FLAG_CASE);
-        foreach ($exts as $e) {
-            echo $e, PHP_EOL;
-        }
-    ' 2>/dev/null || true
+    "${PHP_BIN}" -m 2>/dev/null | awk '
+        NF && $0 !~ /^\[/ { print }
+    ' | while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
+        normalize_ext_name "${ext}"
+    done | sort -fu || true
 }
 
 php_ext_version() {
     ext="$1"
-    if ext_is_loaded "${ext}"; then
+
+    version="$(
         "${PHP_BIN}" -r '
-            $v = phpversion($argv[1]);
-            if ($v === false || $v === null || $v === "") {
-                $v = "(built-in/unknown)";
+            $ext = $argv[1];
+            $v = phpversion($ext);
+            if ($v !== false && $v !== null && $v !== "") {
+                echo $v, PHP_EOL;
             }
-            echo $v, PHP_EOL;
-        ' "${ext}" 2>/dev/null || printf '%s\n' "-"
-    else
-        printf '%s\n' "-"
+        ' "${ext}" 2>/dev/null || true
+    )"
+
+    if [ -n "${version}" ]; then
+        printf '%s\n' "${version}"
+        return 0
     fi
+
+    version="$(
+        "${PHP_BIN}" --ri "${ext}" 2>/dev/null | sed -n 's/^Version => //p' | head -n1 || true
+    )"
+
+    if [ -n "${version}" ]; then
+        printf '%s\n' "${version}"
+        return 0
+    fi
+
+    printf '%s\n' "-"
 }
 
 php_parsed_ini_files() {
@@ -209,9 +301,16 @@ emit_object() {
 pretty_print_tsv() {
     file="$1"
     awk -F '\t' '
+        function repeat_space(n,    i, out) {
+            out = ""
+            for (i = 0; i < n; i++) {
+                out = out " "
+            }
+            return out
+        }
         {
-            rows[NR]=$0
-            for (i=1; i<=NF; i++) {
+            rows[NR] = $0
+            for (i = 1; i <= NF; i++) {
                 if (length($i) > w[i]) {
                     w[i] = length($i)
                 }
@@ -222,12 +321,12 @@ pretty_print_tsv() {
             nr = NR
         }
         END {
-            for (r=1; r<=nr; r++) {
+            for (r = 1; r <= nr; r++) {
                 split(rows[r], f, FS)
-                for (i=1; i<=nf; i++) {
+                for (i = 1; i <= nf; i++) {
                     val = f[i]
                     if (i < nf) {
-                        printf "%-*s", w[i] + 2, val
+                        printf "%s%s", val, repeat_space((w[i] + 2) - length(val))
                     } else {
                         printf "%s", val
                     }
@@ -291,7 +390,11 @@ render_table_file() {
 
 apk_add_if_any() {
     if [ $# -gt 0 ] && [ -n "$*" ]; then
-        apk add --no-cache "$@"
+        if [ "${verbose:-no}" = "yes" ]; then
+            apk add --no-cache "$@"
+        else
+            apk add --no-cache "$@" >/dev/null 2>&1
+        fi
     fi
 }
 
@@ -299,7 +402,12 @@ php_build_deps_install() {
     if apk info --installed "${PHP_BUILD_DEPS_VIRTUAL}" >/dev/null 2>&1; then
         return 0
     fi
-    apk add --no-cache --virtual "${PHP_BUILD_DEPS_VIRTUAL}" ${PHP_BUILD_DEPS}
+
+    if [ "${verbose:-no}" = "yes" ]; then
+        apk add --no-cache --virtual "${PHP_BUILD_DEPS_VIRTUAL}" ${PHP_BUILD_DEPS}
+    else
+        apk add --no-cache --virtual "${PHP_BUILD_DEPS_VIRTUAL}" ${PHP_BUILD_DEPS} >/dev/null 2>&1
+    fi
 }
 
 php_build_deps_cleanup() {
@@ -340,6 +448,33 @@ resolve_ext_active_ini() {
     done
 
     return 1
+}
+
+ext_is_builtin_only() {
+    ext="$1"
+
+    case "$(printf '%s' "${ext}" | tr '[:upper:]' '[:lower:]')" in
+        core|ctype|curl|date|dom|fileinfo|filter|hash|iconv|json|libxml|mbstring|mysqlnd|opcache|openssl|pcre|pdo|pdo_sqlite|pgsql|pdo_pgsql|phar|posix|random|readline|reflection|session|simplexml|spl|sqlite3|standard|tokenizer|xml|xmlreader|xmlwriter|zlib|lexbor|uri)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+ext_versions() {
+    tmp="$(mktemp_file)"
+    printf 'name\tversion\n' > "${tmp}"
+
+    php_loaded_extensions_list | while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
+        ext_is_builtin_only "${ext}" && continue
+        printf '%s\t%s\n' "${ext}" "$(php_ext_version "${ext}")"
+    done >> "${tmp}"
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
 }
 
 ext_name_from_ini() {
@@ -576,21 +711,11 @@ ext_install_core() {
     cleanup_core_install() {
         [ "${core_cleanup_done}" = "yes" ] && return 0
         core_cleanup_done="yes"
-        php_source_cleanup
+
         if [ "${no_cleanup}" != "yes" ]; then
-            php_build_deps_cleanup
+            php_source_cleanup
         fi
     }
-
-    if [ -n "${runtime_pkgs}" ]; then
-        apk_add_if_any ${runtime_pkgs}
-    fi
-
-    php_build_deps_install
-
-    if [ -n "${apk_deps}" ]; then
-        apk_add_if_any ${apk_deps}
-    fi
 
     php_source_prepare
     trap cleanup_core_install EXIT INT TERM
@@ -663,22 +788,10 @@ ext_install_pecl() {
     runtime_pkgs="$7"
 
     cleanup_pecl_install() {
-        if [ "${no_cleanup}" != "yes" ]; then
-            php_build_deps_cleanup
-        fi
+        :
     }
 
     cmd_exists "${PECL_BIN}" || die "pecl binary not found"
-
-    if [ -n "${runtime_pkgs}" ]; then
-        apk_add_if_any ${runtime_pkgs}
-    fi
-
-    php_build_deps_install
-
-    if [ -n "${apk_deps}" ]; then
-        apk_add_if_any ${apk_deps}
-    fi
 
     trap cleanup_pecl_install EXIT INT TERM
 
@@ -687,8 +800,8 @@ ext_install_pecl() {
         package="${ext}-${version}"
     fi
 
-    "${PECL_BIN}" channel-update pecl.php.net >/dev/null 2>&1 || true
-    yes '' | "${PECL_BIN}" install "${package}" >/dev/null
+    pecl_channel_update_once_per_ttl
+    yes '' | "${PECL_BIN}" install "${package}"
 
     [ -f "$(php_extension_dir)/${ext}.so" ] || die "Installed module file not found for: ${ext}"
 
@@ -1183,14 +1296,16 @@ Usage:
   ${PROG} ext <subcommand> [args]
 
 Subcommands:
-  list                 List discovered extensions
+  list [--active] [--available]
+                       List extensions quickly using local runtime and ini files only
   list-loaded          List loaded extensions
   versions             Show loaded extensions with versions
   detect <ext>         Detect extension type
   pecl-list            Show PECL registry packages
   so-list              Show extension directory shared objects
   status <ext>         Show status of one extension
-  install <ext>        Install one extension
+  install <ext...>     Install one or more extensions
+  cleanup              Remove build deps, temporary PHP sources and PECL cache
   uninstall <ext>      Uninstall one extension
   enable <ext>         Enable extension by linking ini into active dir
   disable <ext>        Disable extension by removing active ini
@@ -1204,7 +1319,7 @@ EOF
             emit_object <<EOF
 section=ext
 usage=${PROG} ext <subcommand> [args]
-subcommands=list,list-loaded,versions,detect,pecl-list,so-list,status,install,uninstall,enable,disable,enable-all,disable-all,doctor,help
+subcommands=list,list-loaded,versions,detect,pecl-list,so-list,status,install,cleanup,uninstall,enable,disable,enable-all,disable-all,doctor,help
 EOF
             ;;
         *)
@@ -1213,10 +1328,70 @@ EOF
     esac
 }
 
+ext_is_builtin_only() {
+    ext="$1"
+
+    case "$(printf '%s' "${ext}" | tr '[:upper:]' '[:lower:]')" in
+        core|ctype|curl|date|dom|fileinfo|filter|hash|iconv|json|libxml|mbstring|mysqlnd|opcache|openssl|pcre|pdo|pdo_sqlite|pgsql|pdo_pgsql|phar|posix|random|readline|reflection|session|simplexml|spl|sqlite3|standard|tokenizer|xml|xmlreader|xmlwriter|zlib|lexbor|uri)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 ext_list() {
+    filter_active="no"
+    filter_available="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --active)
+                filter_active="yes"
+                shift
+                ;;
+            --available)
+                filter_available="yes"
+                shift
+                ;;
+            -h|--help)
+                case "${OUTPUT_FORMAT}" in
+                    text)
+                        cat <<EOF
+Usage:
+  ${PROG} ext list [--active] [--available]
+
+Options:
+  --active      Show only active extensions and hide the active column
+  --available   Show only available extensions and hide the available column
+EOF
+                        ;;
+                    json|tsv)
+                        emit_object <<EOF
+section=ext_list
+usage=${PROG} ext list [--active] [--available]
+options=--active,--available
+EOF
+                        ;;
+                    *)
+                        die "Unsupported output format: ${OUTPUT_FORMAT}"
+                        ;;
+                esac
+                return 0
+                ;;
+            *)
+                die "Unknown list option: $1"
+                ;;
+        esac
+    done
+
     tmp_names="$(mktemp_file)"
     tmp_rows="$(mktemp_file)"
+    tmp_loaded="$(mktemp_file)"
+
     : > "${tmp_names}"
+    : > "${tmp_loaded}"
 
     if [ -d "${PHP_EXT_AVAILABLE_DIR}" ]; then
         for f in "${PHP_EXT_AVAILABLE_DIR}"/*.ini; do
@@ -1232,19 +1407,69 @@ ext_list() {
         done
     fi
 
-    php_loaded_extensions_list >> "${tmp_names}"
+    php_loaded_extensions_list | while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
+        printf '%s\t%s\n' "${ext}" "$(php_ext_version "${ext}")"
+    done | tee "${tmp_loaded}" | awk -F '\t' '{ print $1 }' >> "${tmp_names}"
 
-    printf 'name\tavailable\tactive\tloaded\tversion\ttype\tavailable_ini\tactive_ini\n' > "${tmp_rows}"
+    {
+        printf 'name\t'
+        [ "${filter_available}" != "yes" ] && printf 'available\t'
+        [ "${filter_active}" != "yes" ] && printf 'active\t'
+        printf 'loaded\tversion\tavailable_ini\tactive_ini\n'
+    } > "${tmp_rows}"
 
     if [ -s "${tmp_names}" ]; then
         sort -fu "${tmp_names}" | while IFS= read -r ext; do
             [ -n "${ext}" ] || continue
-            collect_ext_row "${ext}"
-        done >> "${tmp_rows}"
+
+            resolved_available_ini="$(resolve_ext_ini "${ext}" 2>/dev/null || true)"
+            resolved_active_ini="$(resolve_ext_active_ini "${ext}" 2>/dev/null || true)"
+
+            avail="no"
+            active="no"
+            loaded="no"
+            version="-"
+            available_ini="-"
+            active_ini="-"
+
+            if [ -n "${resolved_available_ini}" ]; then
+                avail="yes"
+                available_ini="${resolved_available_ini}"
+            elif ext_module_file_exists "${ext}"; then
+                avail="yes"
+            fi
+
+            if [ -n "${resolved_active_ini}" ]; then
+                active="yes"
+                active_ini="${resolved_active_ini}"
+            fi
+
+            loaded_line="$(awk -F '\t' -v ext="${ext}" '$1 == ext { print; exit }' "${tmp_loaded}")"
+            if [ -n "${loaded_line}" ]; then
+                loaded="yes"
+                version="$(printf '%s\n' "${loaded_line}" | awk -F '\t' '{ print $2 }')"
+            fi
+
+            if [ "${filter_active}" = "yes" ] && [ "${active}" != "yes" ]; then
+                continue
+            fi
+
+            if [ "${filter_available}" = "yes" ] && [ "${avail}" != "yes" ]; then
+                continue
+            fi
+
+            {
+                printf '%s\t' "${ext}"
+                [ "${filter_available}" != "yes" ] && printf '%s\t' "${avail}"
+                [ "${filter_active}" != "yes" ] && printf '%s\t' "${active}"
+                printf '%s\t%s\t%s\t%s\n' "${loaded}" "${version}" "${available_ini}" "${active_ini}"
+            } >> "${tmp_rows}"
+        done
     fi
 
     render_table_file "${tmp_rows}"
-    rm -f "${tmp_names}" "${tmp_rows}"
+    rm -f "${tmp_names}" "${tmp_rows}" "${tmp_loaded}"
 }
 
 ext_list_loaded() {
@@ -1516,7 +1741,7 @@ ext_install_usage() {
         text)
             cat <<EOF
 Usage:
-  ${PROG} ext install <ext> [options]
+  ${PROG} ext install <ext> [ext...] [options]
 
 Options:
   --type <auto|core|pecl> Detect or force extension source type
@@ -1529,13 +1754,14 @@ Options:
   --ini-name <name>        Override generated ini file name
   --force                  Reinstall even if extension appears installed
   --no-cleanup             Do not remove temporary build dependencies
+  --verbose                Show full PECL/build output
 EOF
             ;;
         json|tsv)
             emit_object <<EOF
 section=ext_install
-usage=${PROG} ext install <ext> [options]
-options=--type,--enable,--version,--apk,--runtime,--jobs,--configure,--ini-name,--force,--no-cleanup
+usage=${PROG} ext install <ext> [ext...] [options]
+options=--type,--enable,--version,--apk,--runtime,--jobs,--configure,--ini-name,--force,--no-cleanup,--verbose
 EOF
             ;;
         *)
@@ -1616,44 +1842,62 @@ details=${details}
 EOF
 }
 
+ext_cleanup() {
+    php_build_deps_cleanup || true
+    php_source_cleanup || true
+
+    if cmd_exists "${PECL_BIN}"; then
+        "${PECL_BIN}" clear-cache >/dev/null 2>&1 || true
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=cleanup
+EOF
+}
+
 ext_install() {
-    [ $# -gt 0 ] || die "Usage: ${PROG} ext install <ext> [options]"
-
-    ext="$1"
-    shift
-
     type="auto"
     enable_after="no"
     pecl_version=""
-    apk_deps=""
-    runtime_pkgs=""
-    jobs="1"
+    jobs="$(detect_jobs)"
     ini_name=""
     force="no"
     no_cleanup="no"
+    verbose="no"
+
+    exts_file="$(mktemp_file)"
     configure_args_file="$(mktemp_file)"
+    summary_file="$(mktemp_file)"
+
+    : > "${exts_file}"
     : > "${configure_args_file}"
+    printf 'extension\tresult\ttype\tavailable\tini_file\tdetails\n' > "${summary_file}"
+
+    apk_deps=""
+    runtime_pkgs=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --type)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --type"
-                case "$1" in
-                    auto|core|pecl) type="$1" ;;
-                    *) rm -f "${configure_args_file}"; die "Unsupported extension type: $1" ;;
+                [ $# -ge 2 ] || die "--type requires value"
+                case "$2" in
+                    auto|core|pecl) type="$2" ;;
+                    *)
+                        rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"
+                        die "Unsupported extension type: $2"
+                        ;;
                 esac
-                shift
+                shift 2
                 ;;
             --enable)
                 enable_after="yes"
                 shift
                 ;;
             --version)
-                shift
-                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --version"; }
-                pecl_version="$1"
-                shift
+                [ $# -ge 2 ] || die "--version requires value"
+                pecl_version="$2"
+                shift 2
                 ;;
             --apk)
                 shift
@@ -1670,22 +1914,19 @@ ext_install() {
                 done
                 ;;
             --jobs)
-                shift
-                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --jobs"; }
-                jobs="$1"
-                shift
+                [ $# -ge 2 ] || die "--jobs requires value"
+                jobs="$2"
+                shift 2
                 ;;
             --configure)
-                shift
-                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --configure"; }
-                printf '%s\n' "$1" >> "${configure_args_file}"
-                shift
+                [ $# -ge 2 ] || die "--configure requires value"
+                printf '%s\n' "$2" >> "${configure_args_file}"
+                shift 2
                 ;;
             --ini-name)
-                shift
-                [ $# -gt 0 ] || { rm -f "${configure_args_file}"; die "Missing value for --ini-name"; }
-                ini_name="$1"
-                shift
+                [ $# -ge 2 ] || die "--ini-name requires value"
+                ini_name="$2"
+                shift 2
                 ;;
             --force)
                 force="yes"
@@ -1695,123 +1936,186 @@ ext_install() {
                 no_cleanup="yes"
                 shift
                 ;;
+            --verbose)
+                verbose="yes"
+                shift
+                ;;
             -h|--help)
-                rm -f "${configure_args_file}"
                 ext_install_usage
+                rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"
                 return 0
                 ;;
-            *)
-                rm -f "${configure_args_file}"
+            --)
+                shift
+                while [ $# -gt 0 ]; do
+                    printf '%s\n' "$1" >> "${exts_file}"
+                    shift
+                done
+                ;;
+            -*)
+                rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"
                 die "Unknown install option: $1"
+                ;;
+            *)
+                printf '%s\n' "$1" >> "${exts_file}"
+                shift
                 ;;
         esac
     done
 
-    requested_package="${ext}"
-    if [ -n "${pecl_version}" ]; then
-        requested_package="${ext}-${pecl_version}"
+    [ -s "${exts_file}" ] || die "Usage: ${PROG} ext install <ext> [ext...] [options]"
+
+    trap 'if [ "${no_cleanup}" != "yes" ]; then php_source_cleanup; php_build_deps_cleanup; fi; rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"' EXIT INT TERM
+
+    php_build_deps_install
+
+    if [ -n "${runtime_pkgs# }" ]; then
+        apk_add_if_any ${runtime_pkgs# }
     fi
 
-    detected_for_auto=""
-    if [ "${type}" = "auto" ]; then
-        detected_for_auto="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
-        case "${detected_for_auto}" in
-            core)
-                type="core"
-                ;;
-            pecl)
-                type="pecl"
-                ;;
-            core-known-but-source-not-extracted)
-                type="core"
-                ;;
-            core-known-but-source-missing)
-                rm -f "${configure_args_file}"
-                die "Extension looks like a core extension but PHP source helper or source tarball is missing: ${ext}"
-                ;;
-            *)
-                rm -f "${configure_args_file}"
-                die "Unable to detect extension type for: ${ext}"
-                ;;
-        esac
+    if [ -n "${apk_deps# }" ]; then
+        apk_add_if_any ${apk_deps# }
     fi
 
-    if [ "${type}" = "core" ] && [ -n "${pecl_version}" ]; then
-        rm -f "${configure_args_file}"
-        die "--version is only supported for PECL extensions"
-    fi
+    while IFS= read -r ext; do
+        [ -n "${ext}" ] || continue
 
-    if [ "${force}" != "yes" ] && ext_already_present "${ext}"; then
-        rm -f "${configure_args_file}"
-        ext_emit_install_skip "${ext}" "${type}" "${enable_after}" "${requested_package}"
-        return 0
-    fi
+        requested_package="${ext}"
+        if [ -n "${pecl_version}" ]; then
+            requested_package="${ext}-${pecl_version}"
+        fi
 
-    if [ "${force}" = "yes" ]; then
-        ext_disable "${ext}" >/dev/null 2>&1 || true
+        if [ "${type}" = "auto" ]; then
+            detected="$(ext_detect_type_value "${ext}" 2>/dev/null || printf '%s' unknown)"
+            case "${detected}" in
+                core|core-known-but-source-not-extracted)
+                    install_type="core"
+                    ;;
+                pecl)
+                    install_type="pecl"
+                    ;;
+                core-known-but-source-missing)
+                    die "Extension looks like a core extension but PHP source helper or source tarball is missing: ${ext}"
+                    ;;
+                *)
+                    die "Unable to detect extension type for: ${ext}"
+                    ;;
+            esac
+        else
+            install_type="${type}"
+        fi
+
+        if [ "${install_type}" = "core" ] && [ -n "${pecl_version}" ]; then
+            die "--version is only supported for PECL extensions"
+        fi
+
+        if [ "${force}" != "yes" ] && ext_already_present "${ext}"; then
+            if [ "${verbose}" = "yes" ]; then
+                log "Skipping already present extension: ${ext}"
+            fi
+
+            ini_path="-"
+            available="no"
+
+            if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+                available="yes"
+                ini_path="$(resolve_ext_ini "${ext}")"
+            elif ext_module_file_exists "${ext}"; then
+                available="yes"
+            fi
+
+            if [ "${enable_after}" = "yes" ] && [ "$(resolve_ext_active_ini "${ext}" 2>/dev/null || true)" = "" ]; then
+                if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+                    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+                    ini_path="$(resolve_ext_ini "${ext}")"
+                    ln -sf "${ini_path}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${ini_path}")"
+                elif ext_module_file_exists "${ext}"; then
+                    ini_path="$(ext_write_ini "${ext}" "${ext}" "${ini_name}")"
+                    mkdir -p "${PHP_EXT_ACTIVE_DIR}"
+                    ln -sf "${ini_path}" "${PHP_EXT_ACTIVE_DIR}/$(basename "${ini_path}")"
+                    available="yes"
+                fi
+            fi
+
+            printf '%s\tskipped\t%s\t%s\t%s\t%s\n' \
+                "${ext}" "${install_type}" "${available}" "${ini_path}" "already present" >> "${summary_file}"
+            continue
+        fi
+
+        if [ "${force}" = "yes" ]; then
+            ext_disable "${ext}" >/dev/null 2>&1 || true
+
+            if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
+                rm -f "$(resolve_ext_ini "${ext}")"
+            fi
+
+            if [ -f "$(php_extension_dir)/${ext}.so" ]; then
+                rm -f "$(php_extension_dir)/${ext}.so"
+            fi
+
+            if [ "${install_type}" = "pecl" ] && cmd_exists "${PECL_BIN}"; then
+                if [ "${verbose}" = "yes" ]; then
+                    "${PECL_BIN}" uninstall -r "${ext}" || true
+                else
+                    "${PECL_BIN}" uninstall -r "${ext}" >/dev/null 2>&1 || true
+                fi
+            fi
+        fi
+
+        if [ "${install_type}" = "core" ]; then
+            if [ "${verbose}" = "yes" ]; then
+                ext_install_core "${ext}" "${jobs}" "${enable_after}" "yes" "${ini_name}" "" "" "${configure_args_file}"
+            else
+                ext_install_core "${ext}" "${jobs}" "${enable_after}" "yes" "${ini_name}" "" "" "${configure_args_file}" >/dev/null 2>&1
+            fi
+        else
+            if [ "${verbose}" = "yes" ]; then
+                ext_install_pecl "${ext}" "${pecl_version}" "${enable_after}" "yes" "${ini_name}" "" ""
+            else
+                ext_install_pecl "${ext}" "${pecl_version}" "${enable_after}" "yes" "${ini_name}" "" "" >/dev/null 2>&1
+            fi
+        fi
+
+        ini_path="-"
+        available="no"
 
         if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
-            rm -f "$(resolve_ext_ini "${ext}")"
+            available="yes"
+            ini_path="$(resolve_ext_ini "${ext}")"
+        elif ext_module_file_exists "${ext}"; then
+            available="yes"
         fi
 
-        if [ -f "$(php_extension_dir)/${ext}.so" ]; then
-            rm -f "$(php_extension_dir)/${ext}.so"
-        fi
+        printf '%s\tinstalled\t%s\t%s\t%s\t%s\n' \
+            "${ext}" "${install_type}" "${available}" "${ini_path}" "ok" >> "${summary_file}"
+    done < "${exts_file}"
 
-        if [ "${type}" = "pecl" ] && cmd_exists "${PECL_BIN}"; then
-            "${PECL_BIN}" uninstall -r "${ext}" >/dev/null 2>&1 || true
-        fi
+    if [ "${no_cleanup}" != "yes" ]; then
+        php_source_cleanup
+        php_build_deps_cleanup
     fi
 
-    if [ "${type}" = "pecl" ]; then
-        ext_install_pecl "${ext}" "${pecl_version}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }"
-        package="${requested_package}"
-    else
-        ext_install_core "${ext}" "${jobs}" "${enable_after}" "${no_cleanup}" "${ini_name}" "${apk_deps# }" "${runtime_pkgs# }" "${configure_args_file}"
-        package="${ext}"
-    fi
+    trap - EXIT INT TERM
 
-    rm -f "${configure_args_file}"
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf '\n'
+            printf 'Install summary:\n'
+            render_table_file "${summary_file}"
+            ;;
+        json)
+            tsv_file_to_json "${summary_file}"
+            ;;
+        tsv)
+            cat "${summary_file}"
+            ;;
+        *)
+            rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
 
-    avail="no"
-    active="no"
-    loaded="no"
-    version="-"
-    available_ini="-"
-    active_ini="-"
-
-    if resolve_ext_ini "${ext}" >/dev/null 2>&1; then
-        avail="yes"
-        available_ini="$(resolve_ext_ini "${ext}")"
-    elif ext_module_file_exists "${ext}"; then
-        avail="yes"
-    fi
-
-    if resolve_ext_active_ini "${ext}" >/dev/null 2>&1; then
-        active="yes"
-        active_ini="$(resolve_ext_active_ini "${ext}")"
-    fi
-
-    if ext_is_loaded "${ext}"; then
-        loaded="yes"
-        version="$(php_ext_version "${ext}")"
-    fi
-
-    emit_object <<EOF
-ok=yes
-action=install
-extension=${ext}
-type=${type}
-requested_package=${package}
-enabled=${enable_after}
-available=${avail}
-active=${active}
-loaded=${loaded}
-version=${version}
-available_ini=${available_ini}
-active_ini=${active_ini}
-cleanup_performed=$( [ "${no_cleanup}" = "yes" ] && printf '%s' "no" || printf '%s' "yes" )
-EOF
+    rm -f "${exts_file}" "${configure_args_file}" "${summary_file}"
 }
 
 ext_uninstall_usage() {
@@ -1938,6 +2242,10 @@ handle_ext() {
         install)
             shift
             ext_install "$@"
+            ;;
+        cleanup)
+            shift
+            ext_cleanup "$@"
             ;;
         uninstall)
             shift
