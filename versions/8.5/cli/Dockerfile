@@ -45,7 +45,7 @@ RUN set -eux; \
 
 FROM php:8.5.4-cli-alpine3.23 AS runtime
 
-ARG PHPCTL_VERSION=0.3.5
+ARG PHPCTL_VERSION=0.3.6
 
 RUN set -eux; \
   apk add --no-cache \
