@@ -1,3 +1,12 @@
+## 0.3.6 - 2026-03-16
+
+- phpctl v0.3.6 (d52c599) by Rafał Masiarek
+- chore(repo): refresh generated assets (c32ab32) by github-actions[bot]
+- chore(repo): refresh generated assets (5656043) by github-actions[bot]
+- chore(repo): refresh generated assets (1f59d95) by github-actions[bot]
+- modify gen-readme to take docs (de62c54) by Rafał Masiarek
+- feat: modify readme generator (49eea30) by Rafał Masiarek
+- chore(images): bump phpctl to 0.3.5 (e5badc0) by github-actions[bot]
 ## 0.3.5 - 2026-03-16
 
 - fix problem with dockerfile available modules path (cf45fb2) by Rafał Masiarek
