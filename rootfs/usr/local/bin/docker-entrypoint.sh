@@ -2,13 +2,28 @@
 set -Eeuo pipefail
 
 ENTRYPOINT_DIR="${ENTRYPOINT_DIR:-/docker-entrypoint.d}"
+ENTRYPOINT_DEBUG="${ENTRYPOINT_DEBUG:-0}"
+ENTRYPOINT_DEBUG_FD="${ENTRYPOINT_DEBUG_FD:-2}"
+
+case "$ENTRYPOINT_DEBUG_FD" in
+  1|2) ;;
+  *)
+    echo "Invalid ENTRYPOINT_DEBUG_FD=$ENTRYPOINT_DEBUG_FD, expected 1 or 2" >&2
+    exit 1
+    ;;
+esac
+
+log() {
+  [[ "$ENTRYPOINT_DEBUG" == "1" ]] || return 0
+  printf '[entrypoint] %s\n' "$*" >&"$ENTRYPOINT_DEBUG_FD"
+}
 
 run_parts() {
   local dir="$1"
 
   [[ -d "$dir" ]] || return 0
 
-  echo "[entrypoint] loading scripts from: $dir"
+  log "loading scripts from: $dir"
 
   local file
   for file in "$dir"/*; do
@@ -17,16 +32,16 @@ run_parts() {
     case "$file" in
       *.sh)
         if [[ -x "$file" ]]; then
-          echo "[entrypoint] running: $file"
+          log "running: $file"
           "$file"
         else
-          echo "[entrypoint] sourcing: $file"
+          log "sourcing: $file"
           # shellcheck disable=SC1090
           . "$file"
         fi
         ;;
       *)
-        echo "[entrypoint] skipping: $file"
+        log "skipping: $file"
         ;;
     esac
   done
@@ -34,5 +49,5 @@ run_parts() {
 
 run_parts "$ENTRYPOINT_DIR"
 
-echo "[entrypoint] starting main process: $*"
+log "starting main process: $*"
 exec "$@"
