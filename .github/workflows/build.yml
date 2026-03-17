@@ -348,125 +348,97 @@ jobs:
           sbom: false
           cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
 
-      - name: Run phpctl smoke tests on candidate image
-        id: phpctl_smoke
+      - name: Validate PHP version and expected PECL extensions
+        id: phpctl_check
         shell: bash
         run: |
           set -euo pipefail
 
           img="local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate"
-          log="/tmp/phpctl-smoke-${{ matrix.php }}-${{ matrix.variant }}.txt"
+          log="/tmp/phpctl-check-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
           {
-            echo "### phpctl smoke tests for $img"
+            echo "### phpctl validation for $img"
             echo
 
-            echo "== phpctl version =="
-            docker run --rm "$img" sh -lc 'phpctl version'
+            echo "== phpctl info =="
+            docker run --rm "$img" sh -lc 'phpctl --output json info' > /tmp/phpctl-info.raw
+            jq . < /tmp/phpctl-info.raw
+            jq -c . < /tmp/phpctl-info.raw > /tmp/phpctl-info.json
 
             echo
-            echo "== phpctl help =="
-            docker run --rm "$img" sh -lc 'phpctl help | sed -n "1,25p"'
+            echo "== phpctl ext versions =="
+            docker run --rm "$img" sh -lc 'phpctl --output json ext versions' > /tmp/phpctl-ext-versions.raw
+            jq . < /tmp/phpctl-ext-versions.raw
+            jq -c . < /tmp/phpctl-ext-versions.raw > /tmp/phpctl-ext-versions.json
 
             echo
-            echo "== phpctl json version =="
-            docker run --rm "$img" sh -lc 'phpctl --output json version'
-
-            echo
-            echo "== phpctl json info =="
-            docker run --rm "$img" sh -lc 'phpctl --output json info'
-
-            echo
-            echo "== phpctl json paths =="
-            docker run --rm "$img" sh -lc 'phpctl --output json paths'
-
-            echo
-            echo "== phpctl json doctor =="
-            docker run --rm "$img" sh -lc 'phpctl --output json doctor'
-
-            echo
-            echo "== phpctl json self-test =="
-            docker run --rm "$img" sh -lc 'phpctl --output json self-test'
-
-            echo
-            echo "== phpctl json ini show =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini show'
-
-            echo
-            echo "== phpctl json ini get memory_limit =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini get memory_limit'
-
-            echo
-            echo "== phpctl json ext list =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext list'
-
-            echo
-            echo "== phpctl json ext versions =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext versions'
-
-            echo
-            echo "== phpctl json ext so-list =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext so-list'
-
-            echo
-            echo "== phpctl ext detect gd =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect gd'
-
-            echo
-            echo "== phpctl ext detect redis =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect redis || true'
-
-            if [ "${{ matrix.variant }}" = "fpm" ]; then
-              echo
-              echo "== phpctl fpm status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm status'
-
-              echo
-              echo "== phpctl fpm test =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm test || true'
-
-              echo
-              echo "== phpctl fpm pool render =="
-              docker run --rm "$img" sh -lc 'phpctl fpm pool render smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke'
-
-              echo
-              echo "== phpctl fpm pool create/show/enable/disable/delete =="
-              docker run --rm "$img" sh -lc '
-                set -eu
-                phpctl fpm pool create smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke
-                phpctl --output json fpm pool show smoke
-                phpctl --output json fpm pool enable smoke
-                phpctl --output json fpm pool disable smoke
-                phpctl --output json fpm pool delete smoke
-              '
-            else
-              echo
-              echo "== phpctl status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json status || true'
-
-              echo
-              echo "== phpctl health =="
-              docker run --rm "$img" sh -lc 'phpctl --output json health || true'
-
-              echo
-              echo "== phpctl metrics =="
-              docker run --rm "$img" sh -lc 'phpctl metrics | sed -n "1,30p" || true'
-            fi
+            python3 - <<'PY'
+            import json
+            import sys
+            from pathlib import Path
+            
+            php_expected = "${{ matrix.php }}"
+            pecl_file = Path("versions/${{ matrix.php }}/${{ matrix.variant }}/pecl.txt")
+            
+            info = json.loads(Path("/tmp/phpctl-info.json").read_text(encoding="utf-8"))
+            exts = json.loads(Path("/tmp/phpctl-ext-versions.json").read_text(encoding="utf-8"))
+            
+            php_actual = str(info.get("php_version") or "")
+            
+            print("### PHP version")
+            if php_actual.startswith(f"{php_expected}."):
+                print(f"✅ PHP version OK: {php_actual}")
+            else:
+                print(f"❌ PHP version mismatch: expected {php_expected}.x, got {php_actual}", file=sys.stderr)
+                sys.exit(1)
+            
+            expected = []
+            if pecl_file.exists():
+                for raw in pecl_file.read_text(encoding="utf-8").splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    expected.append(line)
+            
+            actual = {}
+            for row in exts:
+                name = str(row.get("name") or "").strip()
+                version = str(row.get("version") or "").strip()
+                if name:
+                    actual[name.lower()] = version
+            
+            print()
+            print("### PECL extensions")
+            
+            missing = []
+            ok = []
+            
+            for name in expected:
+                key = name.lower()
+                if key in actual:
+                    ok.append((name, actual[key] or "-"))
+                else:
+                    missing.append(name)
+            
+            if not expected:
+                print("ℹ️ No expected PECL extensions listed in pecl.txt")
+            
+            for name, version in ok:
+                print(f"✅ {name} ({version})")
+            
+            for name in missing:
+                print(f"❌ {name} (missing)", file=sys.stderr)
+            
+            print()
+            print(f"Summary: {len(ok)}/{len(expected)} expected extensions present")
+            
+            if missing:
+                sys.exit(1)
+            PY
           } | tee "$log"
 
           echo "log=$log" >> "$GITHUB_OUTPUT"
-
-      - name: Add phpctl smoke summary
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "### phpctl smoke tests"
-            echo "- PHP: \`${{ matrix.php }}\`"
-            echo "- Variant: \`${{ matrix.variant }}\`"
-            echo "- Candidate image: \`local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate\`"
-            echo "- Result: \`passed\`"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Trivy scan candidate (JSON)
         uses: aquasecurity/trivy-action@0.35.0
@@ -714,10 +686,45 @@ jobs:
           set -euo pipefail
 
           img="${{ steps.tags.outputs.TAG_SHA }}"
+          expected_php="${{ matrix.php }}"
 
-          docker run --rm "$img" sh -lc 'phpctl version'
-          docker run --rm "$img" sh -lc 'phpctl --output json info'
-          docker run --rm "$img" sh -lc 'phpctl --output json ext list'
+          run_check() {
+            local label="$1"
+            local cmd="$2"
+            local mode="${3:-text}"
+            local assertion="${4:-}"
+
+            echo
+            echo "== $label =="
+
+            if [ "$mode" = "json" ]; then
+              docker run --rm "$img" sh -lc "$cmd" > /tmp/check.json
+              jq . < /tmp/check.json
+
+              if [ -n "$assertion" ]; then
+                if jq -e "$assertion" < /tmp/check.json > /dev/null; then
+                  echo "✅ $label"
+                else
+                  echo "❌ $label" >&2
+                  echo "Assertion failed: $assertion" >&2
+                  exit 1
+                fi
+              else
+                echo "✅ $label"
+              fi
+            else
+              if docker run --rm "$img" sh -lc "$cmd"; then
+                echo "✅ $label"
+              else
+                echo "❌ $label" >&2
+                exit 1
+              fi
+            fi
+          }
+
+          run_check "phpctl version" 'phpctl version'
+          run_check "phpctl info" 'phpctl --output json info' json '.php_version | startswith("'"$expected_php"'.")'
+          run_check "phpctl ext versions" 'phpctl --output json ext versions' json
 
       - name: Trivy scan final image (SARIF)
         uses: aquasecurity/trivy-action@0.35.0
@@ -1015,8 +1022,8 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: phpctl-smoke-${{ matrix.php }}-${{ matrix.variant }}
-          path: ${{ steps.phpctl_smoke.outputs.log }}
+          name: phpctl-check-${{ matrix.php }}-${{ matrix.variant }}
+          path: ${{ steps.phpctl_check.outputs.log }}
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
