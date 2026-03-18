@@ -1040,37 +1040,37 @@ jobs:
 
           cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: phpctl-check-${{ matrix.php }}-${{ matrix.variant }}
           path: ${{ steps.phpctl_check.outputs.log }}
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: image-meta-${{ matrix.php }}-${{ matrix.variant }}
           path: out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: trivy-summary-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}
           path: out/hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}.json
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vulns-${{ matrix.php }}-${{ matrix.variant }}
           path: out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json
@@ -1097,7 +1097,7 @@ jobs:
 
       - name: Download vulnerability artifacts
         if: needs.discover.outputs.count != '0'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: vulns-*
           path: artifacts/vulns
@@ -1105,7 +1105,7 @@ jobs:
 
       - name: Download hotfix metadata artifacts
         if: needs.discover.outputs.count != '0'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: hotfix-meta-*
           path: artifacts/hotfix-meta
@@ -1617,7 +1617,7 @@ jobs:
 
       - name: Download image metadata artifacts
         if: needs.discover.outputs.count != '0'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: image-meta-*
           path: artifacts/image-meta
@@ -1625,7 +1625,7 @@ jobs:
 
       - name: Download Trivy summary artifacts
         if: needs.discover.outputs.count != '0'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: trivy-summary-*
           path: artifacts/trivy
@@ -1633,7 +1633,7 @@ jobs:
 
       - name: Download Trivy HTML report artifacts
         if: needs.discover.outputs.count != '0'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: trivy-report-*
           path: artifacts/trivy-html
