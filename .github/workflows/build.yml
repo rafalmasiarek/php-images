@@ -1608,31 +1608,31 @@ jobs:
           php_lifecycle_field() {
             local php="$1" field="$2"
             python3 - "$php" "$field" <<'PY'
-            import json
-            import sys
-            from pathlib import Path
-            
-            php = sys.argv[1]
-            field = sys.argv[2]
-            path = Path("web/_data/php-eol.json")
-            
-            if not path.exists():
-                print("")
-                raise SystemExit(0)
-            
-            obj = json.loads(path.read_text(encoding="utf-8"))
-            info = obj.get(php, {})
-            value = info.get(field, "")
-            print(value if value is not None else "")
-            PY
-                      }
-            
-                      urlencode() {
-                        python3 - "$1" <<'PY'
-            import sys
-            from urllib.parse import quote
-            print(quote(sys.argv[1], safe=""))
-            PY
+          import json
+          import sys
+          from pathlib import Path
+          
+          php = sys.argv[1]
+          field = sys.argv[2]
+          path = Path("web/_data/php-eol.json")
+          
+          if not path.exists():
+              print("")
+              raise SystemExit(0)
+          
+          obj = json.loads(path.read_text(encoding="utf-8"))
+          info = obj.get(php, {})
+          value = info.get(field, "")
+          print(value if value is not None else "")
+          PY
+          }
+          
+          urlencode() {
+            python3 - "$1" <<'PY'
+          import sys
+          from urllib.parse import quote
+          print(quote(sys.argv[1], safe=""))
+          PY
           }
 
           shields_endpoint() {
