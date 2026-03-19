@@ -364,6 +364,8 @@ jobs:
 
       - name: Install sanityctl
         shell: bash
+        env:
+          SANITYCTL_VERSION: 1.2.0
         run: |
           set -euo pipefail
           arch="$(uname -m)"
@@ -372,7 +374,7 @@ jobs:
             aarch64|arm64) asset="sanityctl-linux-arm64" ;;
             *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
           esac
-          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
+          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/v${SANITYCTL_VERSION}"
           curl -fsSL -o /tmp/"$asset" "$base/$asset"
           curl -fsSL -o /tmp/SHA256SUMS.txt "$base/SHA256SUMS.txt"
           ( cd /tmp && grep " $asset\$" SHA256SUMS.txt | sha256sum -c - )
@@ -394,7 +396,7 @@ jobs:
           {
             echo "### sanityctl validation for ${IMAGE_TAG}"
             echo
-            sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
+            sanityctl run -f build-php-images-sanity.yaml --output text --summary
           } | tee "$log"
 
           echo "log=$log" >> "$GITHUB_OUTPUT"

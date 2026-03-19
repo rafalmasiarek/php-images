@@ -32,39 +32,14 @@ checks:
           op: exists
 
   - name: php version matches expected branch
-    cmd: |
-      python3 - <<'PY'
-      import json
-      import os
-      import subprocess
-      import sys
-
-      image = os.environ["IMAGE_TAG"]
-      php_mm = os.environ["PHP_MM"]
-
-      proc = subprocess.run(
-          ["docker", "run", "--rm", image, "sh", "-lc", "phpctl --output json info"],
-          check=True,
-          capture_output=True,
-          text=True,
-      )
-
-      data = json.loads(proc.stdout)
-      version = str(data.get("php_version", "")).strip()
-      expected_prefix = f"{php_mm}."
-
-      print(f"expected_prefix={expected_prefix}")
-      print(f"actual_version={version}")
-
-      if not version.startswith(expected_prefix):
-          print(
-              f"Version mismatch: expected prefix {expected_prefix!r}, got {version!r}",
-              file=sys.stderr,
-          )
-          raise SystemExit(1)
-      PY
+    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json info'
+    parser: json
     expect:
       code: 0
+      json:
+        - path: php_version
+          op: startswith
+          value: "${PHP_MM}."
 
   - name: phpctl ext versions returns valid json
     cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json ext versions'
@@ -79,38 +54,12 @@ checks:
       code: 0
 
   - name: php binary reports expected branch
-    cmd: |
-      python3 - <<'PY'
-      import os
-      import subprocess
-      import sys
-
-      image = os.environ["IMAGE_TAG"]
-      php_mm = os.environ["PHP_MM"]
-
-      proc = subprocess.run(
-          ["docker", "run", "--rm", image, "sh", "-lc", "php -v"],
-          check=True,
-          capture_output=True,
-          text=True,
-      )
-
-      stdout = proc.stdout
-      expected_fragment = f"PHP {php_mm}."
-
-      print(f"expected_fragment={expected_fragment}")
-      print("stdout:")
-      print(stdout)
-
-      if expected_fragment not in stdout:
-          print(
-              f"Did not find expected fragment {expected_fragment!r} in php -v output",
-              file=sys.stderr,
-          )
-          raise SystemExit(1)
-      PY
+    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -v'
     expect:
       code: 0
+      stdout:
+        - op: contains
+          value: "PHP ${PHP_MM}."
 
   - name: php module list works
     cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -m'
