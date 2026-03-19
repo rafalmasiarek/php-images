@@ -1004,6 +1004,7 @@ jobs:
           if [ "${{ needs.discover.outputs.count }}" != "0" ] && [ "${{ needs.build.result }}" != "success" ]; then
             echo "Build job did not complete successfully." >&2
             exit 1
+          fi
 
       - name: Download vulnerability artifacts
         if: needs.discover.outputs.count != '0'
