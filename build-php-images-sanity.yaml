@@ -1,7 +1,7 @@
 report:
   status_labels:
-    passed: PASS
-    failed: FAIL
+    passed: PASS ✅
+    failed: FAIL ⛔
 
 checks:
   - name: phpctl version exits successfully
@@ -32,14 +32,39 @@ checks:
           op: exists
 
   - name: php version matches expected branch
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json info'
-    parser: json
+    cmd: |
+      python3 - <<'PY'
+      import json
+      import os
+      import subprocess
+      import sys
+
+      image = os.environ["IMAGE_TAG"]
+      php_mm = os.environ["PHP_MM"]
+
+      proc = subprocess.run(
+          ["docker", "run", "--rm", image, "sh", "-lc", "phpctl --output json info"],
+          check=True,
+          capture_output=True,
+          text=True,
+      )
+
+      data = json.loads(proc.stdout)
+      version = str(data.get("php_version", "")).strip()
+      expected_prefix = f"{php_mm}."
+
+      print(f"expected_prefix={expected_prefix}")
+      print(f"actual_version={version}")
+
+      if not version.startswith(expected_prefix):
+          print(
+              f"Version mismatch: expected prefix {expected_prefix!r}, got {version!r}",
+              file=sys.stderr,
+          )
+          raise SystemExit(1)
+      PY
     expect:
       code: 0
-      json:
-        - path: php_version
-          op: startswith
-          value: "${PHP_MM}."
 
   - name: phpctl ext versions returns valid json
     cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json ext versions'
@@ -47,13 +72,45 @@ checks:
     expect:
       code: 0
 
-  - name: php binary reports expected branch
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -v'
+  - name: phpctl ext list returns valid json
+    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json ext list'
+    parser: json
     expect:
       code: 0
-      stdout:
-        - op: contains
-          value: "PHP ${PHP_MM}."
+
+  - name: php binary reports expected branch
+    cmd: |
+      python3 - <<'PY'
+      import os
+      import subprocess
+      import sys
+
+      image = os.environ["IMAGE_TAG"]
+      php_mm = os.environ["PHP_MM"]
+
+      proc = subprocess.run(
+          ["docker", "run", "--rm", image, "sh", "-lc", "php -v"],
+          check=True,
+          capture_output=True,
+          text=True,
+      )
+
+      stdout = proc.stdout
+      expected_fragment = f"PHP {php_mm}."
+
+      print(f"expected_fragment={expected_fragment}")
+      print("stdout:")
+      print(stdout)
+
+      if expected_fragment not in stdout:
+          print(
+              f"Did not find expected fragment {expected_fragment!r} in php -v output",
+              file=sys.stderr,
+          )
+          raise SystemExit(1)
+      PY
+    expect:
+      code: 0
 
   - name: php module list works
     cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -m'
@@ -71,7 +128,7 @@ checks:
         - op: regex
           value: '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
 
-  - name: expected PECL extensions from pecl.txt are present
+  - name: expected extensions from pecl.txt are available and not enabled by default
     cmd: |
       python3 - <<'PY'
       import json
@@ -91,38 +148,92 @@ checks:
                   continue
               expected.append(line)
 
+      if not expected:
+          print("No expected PECL extensions listed in pecl.txt")
+          raise SystemExit(0)
+
       proc = subprocess.run(
-          ["docker", "run", "--rm", image, "sh", "-lc", "phpctl --output json ext versions"],
+          ["docker", "run", "--rm", image, "sh", "-lc", "phpctl --output json ext list"],
           check=True,
           capture_output=True,
           text=True,
       )
 
-      exts = json.loads(proc.stdout)
-      actual = {}
-      for row in exts:
-          name = str(row.get("name") or "").strip()
-          version = str(row.get("version") or "").strip()
-          if name:
-              actual[name.lower()] = version
+      rows = json.loads(proc.stdout)
 
-      missing = [name for name in expected if name.lower() not in actual]
+      actual = {}
+      for row in rows:
+          name = str(row.get("name") or "").strip()
+          if name:
+              actual[name.lower()] = row
+
+      missing_available = []
+      unexpectedly_active = []
+      unexpectedly_loaded = []
 
       print(f"expected={len(expected)}")
-      print(f"missing={len(missing)}")
-
-      if not expected:
-          print("No expected PECL extensions listed in pecl.txt")
-          raise SystemExit(0)
+      print(f"listed={len(actual)}")
 
       for name in expected:
-          key = name.lower()
-          if key in actual:
-              print(f"OK {name} {actual[key] or '-'}")
-          else:
+          row = actual.get(name.lower())
+          if not row:
+              missing_available.append(name)
               print(f"MISSING {name}", file=sys.stderr)
+              continue
 
-      if missing:
+          available = row.get("available")
+          active = row.get("active")
+          loaded = row.get("loaded")
+          version = row.get("version", "-")
+          available_ini = row.get("available_ini", "-")
+          active_ini = row.get("active_ini", "-")
+
+          is_available = available is True or str(available).lower() == "yes"
+          is_active = active is True or str(active).lower() == "yes"
+          is_loaded = loaded is True or str(loaded).lower() == "yes"
+
+          if not is_available:
+              missing_available.append(name)
+
+          if is_active:
+              unexpectedly_active.append(name)
+
+          if is_loaded:
+              unexpectedly_loaded.append(name)
+
+          print(
+              f"EXT {name} "
+              f"available={is_available} "
+              f"active={is_active} "
+              f"loaded={is_loaded} "
+              f"version={version!r} "
+              f"available_ini={available_ini!r} "
+              f"active_ini={active_ini!r}"
+          )
+
+      print(f"missing_available={len(missing_available)}")
+      print(f"unexpectedly_active={len(unexpectedly_active)}")
+      print(f"unexpectedly_loaded={len(unexpectedly_loaded)}")
+
+      if missing_available:
+          print(
+              "Extensions not available to enable: " + ", ".join(missing_available),
+              file=sys.stderr,
+          )
+
+      if unexpectedly_active:
+          print(
+              "Extensions unexpectedly active by default: " + ", ".join(unexpectedly_active),
+              file=sys.stderr,
+          )
+
+      if unexpectedly_loaded:
+          print(
+              "Extensions unexpectedly loaded by default: " + ", ".join(unexpectedly_loaded),
+              file=sys.stderr,
+          )
+
+      if missing_available or unexpectedly_active or unexpectedly_loaded:
           raise SystemExit(1)
       PY
     expect:
