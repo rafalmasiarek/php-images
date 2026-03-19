@@ -58,7 +58,7 @@ jobs:
           fi
 
           json="$(
-            printf '%s\n' "$changed" | jq -R -s '
+            printf '%s\n' "$changed" | jq -c -R -s '
               split("\n")
               | map(select(length > 0))
               | map(capture("^versions/(?<mm>[0-9]+\\.[0-9]+)/(?<variant>[^/]+)/Dockerfile$"))
