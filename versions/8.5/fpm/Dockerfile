@@ -4,7 +4,6 @@ FROM php:8.5.4-fpm-alpine3.23 AS builder
 ARG PECL_FILE=pecl.txt
 ARG PHPCTL_VERSION=0.3.6
 
-COPY rootfs/ /
 COPY ${PECL_FILE} /tmp/pecl.txt
 
 RUN set -eux; \
@@ -45,8 +44,6 @@ RUN set -eux; \
 
 FROM php:8.5.4-fpm-alpine3.23 AS runtime
 
-ARG PHPCTL_VERSION=0.3.6
-
 RUN set -eux; \
   apk add --no-cache \
     bash ca-certificates tzdata curl \
@@ -54,21 +51,16 @@ RUN set -eux; \
     sqlite-libs postgresql-libs libxml2 libxslt tidyhtml gmp \
     freetype libpng libjpeg-turbo gettext \
     openldap cyrus-sasl krb5 net-snmp-libs \
-    rabbitmq-c libssh2 libmemcached imagemagick; \
-  curl -fsSL -o /usr/local/bin/phpctl "https://github.com/rafalmasiarek/php-images/releases/download/phpctl-v${PHPCTL_VERSION}/phpctl"; \
-  curl -fsSL -o /tmp/phpctl.sha256 "https://github.com/rafalmasiarek/php-images/releases/download/phpctl-v${PHPCTL_VERSION}/phpctl.sha256"; \
-  awk '{print $1 "  /usr/local/bin/phpctl"}' /tmp/phpctl.sha256 | sha256sum -c -; \
-  chmod +x /usr/local/bin/phpctl; \
-  rm -f /tmp/phpctl.sha256; \
-  phpctl version
+    rabbitmq-c libssh2 libmemcached imagemagick
 
+COPY --from=builder /usr/local/bin/phpctl /usr/local/bin/phpctl
 COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 COPY --from=builder /usr/local/etc/php/conf.d/available/ /usr/local/etc/php/conf.d/available/
 COPY .hotfixes-selected/ /opt/hotfixes-selected/
-COPY .lifecycle.env /usr/local/share/php-image-lifecycle.env
 COPY rootfs/ /
 
 RUN set -eux; \
+  phpctl version; \
   mkdir -p /usr/local/etc/php/conf.d /usr/local/etc/php/conf.d/available; \
   rm -f /usr/local/etc/php/conf.d/docker-php-ext-*.ini || true; \
   rm -f /usr/local/etc/php/conf.d/zz-*.ini || true; \
@@ -79,6 +71,8 @@ RUN set -eux; \
       /bin/sh "$f"; \
     done; \
   fi
+
+COPY .lifecycle.env /usr/local/share/php-image-lifecycle.env
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["php-fpm"]

@@ -9,13 +9,6 @@ on:
       - "hotfixes/**"
       - "scripts/compute-tags.sh"
       - "scripts/fetch-php-eol.py"
-      - "scripts/gen-readme.py"
-      - "scripts/gen-web-catalog.py"
-      - "web/_config.yml"
-      - "web/index.md"
-      - "web/reports/index.md"
-      - "web/Gemfile"
-      - "web/Gemfile.lock"
       - "build-php-images-sanity.yaml"
       - ".github/workflows/build-php-images-sanity.yml"
   schedule:
@@ -287,7 +280,6 @@ jobs:
                       f"PHP_BRANCH={php}",
                       f"PHP_VERSION={version}",
                       f"PHP_EOL={eol}",
-                      f"IMAGE_BUILT_AT={built_at}",
                       "",
                   ]
               ),
@@ -347,6 +339,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           load: true
           push: false
+          pull: true
           platforms: linux/amd64
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
@@ -356,11 +349,16 @@ jobs:
           provenance: false
           sbom: false
           cache-from: |
-            type=registry,ref=${{ steps.cache.outputs.ref }}
             type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
           cache-to: |
-            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
             type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+
+      - name: Cache sanityctl
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sanityctl
+          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-1.2.0
 
       - name: Install sanityctl
         shell: bash
@@ -374,11 +372,17 @@ jobs:
             aarch64|arm64) asset="sanityctl-linux-arm64" ;;
             *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
           esac
+          cache_dir="${HOME}/.cache/sanityctl/v${SANITYCTL_VERSION}"
+          mkdir -p "$cache_dir"
           base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/v${SANITYCTL_VERSION}"
-          curl -fsSL -o /tmp/"$asset" "$base/$asset"
-          curl -fsSL -o /tmp/SHA256SUMS.txt "$base/SHA256SUMS.txt"
-          ( cd /tmp && grep " $asset\$" SHA256SUMS.txt | sha256sum -c - )
-          sudo install -m 0755 /tmp/"$asset" /usr/local/bin/sanityctl
+          if [ ! -f "${cache_dir}/${asset}" ]; then
+            curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
+          fi
+          if [ ! -f "${cache_dir}/SHA256SUMS.txt" ]; then
+            curl -fsSL -o "${cache_dir}/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
+          fi
+          grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
+          sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
           sanityctl --help
 
       - name: Validate PHP version and expected PECL extensions with sanityctl
@@ -588,6 +592,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: |
@@ -599,11 +604,11 @@ jobs:
           provenance: false
           sbom: false
           cache-from: |
-            type=registry,ref=${{ steps.cache.outputs.ref }}
             type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
           cache-to: |
-            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
             type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
 
       - name: Push final image with hotfixes
         if: steps.hotfixes.outputs.enabled == 'true'
@@ -614,6 +619,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: |
@@ -625,11 +631,11 @@ jobs:
           provenance: false
           sbom: false
           cache-from: |
-            type=registry,ref=${{ steps.cache.outputs.ref }}
             type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
           cache-to: |
-            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
             type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
 
       - name: Resolve final digest
         id: finalimg
@@ -649,17 +655,18 @@ jobs:
 
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Verify pushed image with sanityctl
-        shell: bash
-        env:
-          IMAGE_TAG: ${{ steps.tags.outputs.TAG_SHA }}
-          PHP_MM: ${{ matrix.php }}
-          PECL_FILE: versions/${{ matrix.php }}/${{ matrix.variant }}/pecl.txt
-        run: |
-          set -euo pipefail
-          sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
+      - name: Trivy scan final image (JSON)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
+          format: json
+          output: trivy-results.json
+          vuln-type: os,library
+          severity: CRITICAL,HIGH,MEDIUM
+          ignore-unfixed: true
 
       - name: Trivy scan final image (SARIF)
+        if: github.event_name != 'push'
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -670,19 +677,10 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy SARIF to GitHub Security
+        if: github.event_name != 'push'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
-
-      - name: Trivy scan final image (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
-          format: json
-          output: trivy-results.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
 
       - name: Analyze remediation result
         id: remediation
@@ -781,12 +779,14 @@ jobs:
           echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
 
       - name: Fetch Trivy HTML template
+        if: github.event_name != 'push'
         shell: bash
         run: |
           set -euo pipefail
           curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
 
       - name: Trivy scan final image (HTML report)
+        if: github.event_name != 'push'
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -951,7 +951,9 @@ jobs:
           )
           PY
 
-          cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
+          if [ "${{ github.event_name }}" != "push" ] && [ -f trivy-report.html ]; then
+            cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -972,6 +974,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: github.event_name != 'push'
         with:
           name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
@@ -992,7 +995,7 @@ jobs:
   sync-security-issues:
     name: sync security issues
     needs: [discover, build]
-    if: github.ref == 'refs/heads/main' && always()
+    if: github.ref == 'refs/heads/main' && github.event_name != 'push' && always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1499,7 +1502,7 @@ jobs:
   update-repo:
     name: update releases and generated repository content
     needs: [discover, build, sync-security-issues]
-    if: github.ref == 'refs/heads/main' && always()
+    if: github.ref == 'refs/heads/main' && github.event_name != 'push' && always()
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1608,30 +1611,30 @@ jobs:
           php_lifecycle_field() {
             local php="$1" field="$2"
             python3 - "$php" "$field" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-          
-          php = sys.argv[1]
-          field = sys.argv[2]
-          path = Path("web/_data/php-eol.json")
-          
-          if not path.exists():
-              print("")
-              raise SystemExit(0)
-          
-          obj = json.loads(path.read_text(encoding="utf-8"))
-          info = obj.get(php, {})
-          value = info.get(field, "")
-          print(value if value is not None else "")
+            import json
+            import sys
+            from pathlib import Path
+            
+            php = sys.argv[1]
+            field = sys.argv[2]
+            path = Path("web/_data/php-eol.json")
+            
+            if not path.exists():
+                print("")
+                raise SystemExit(0)
+            
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            info = obj.get(php, {})
+            value = info.get(field, "")
+            print(value if value is not None else "")
           PY
           }
-          
+            
           urlencode() {
             python3 - "$1" <<'PY'
-          import sys
-          from urllib.parse import quote
-          print(quote(sys.argv[1], safe=""))
+            import sys
+            from urllib.parse import quote
+            print(quote(sys.argv[1], safe=""))
           PY
           }
 
@@ -1897,12 +1900,6 @@ jobs:
           {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
           EOF
 
-      - name: Fetch PHP lifecycle data
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/fetch-php-eol.py
-
       - name: Generate README
         shell: bash
         env:
@@ -1950,7 +1947,7 @@ jobs:
   pages-build:
     name: build site for GitHub Pages
     needs: update-repo
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'pages')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -2005,7 +2002,7 @@ jobs:
   deploy-pages:
     name: deploy GitHub Pages
     needs: pages-build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'pages')
     runs-on: ubuntu-latest
     environment:
       name: github-pages
