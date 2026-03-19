@@ -7,10 +7,8 @@ on:
       - "versions/**"
       - "rootfs/**"
       - "hotfixes/**"
-      - "scripts/compute-tags.sh"
-      - "scripts/fetch-php-eol.py"
       - "build-php-images-sanity.yaml"
-      - ".github/workflows/build-php-images-sanity.yml"
+      - ".github/workflows/build.yml"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
@@ -400,7 +398,7 @@ jobs:
           {
             echo "### sanityctl validation for ${IMAGE_TAG}"
             echo
-            sanityctl run -f build-php-images-sanity.yaml --output text --summary
+            sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
           } | tee "$log"
 
           echo "log=$log" >> "$GITHUB_OUTPUT"
@@ -666,7 +664,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Trivy scan final image (SARIF)
-        if: github.event_name != 'push'
+        #if: github.event_name != 'push'
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -677,7 +675,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Upload Trivy SARIF to GitHub Security
-        if: github.event_name != 'push'
+        #if: github.event_name != 'push'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
@@ -779,14 +777,14 @@ jobs:
           echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
 
       - name: Fetch Trivy HTML template
-        if: github.event_name != 'push'
+        #if: github.event_name != 'push'
         shell: bash
         run: |
           set -euo pipefail
           curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
 
       - name: Trivy scan final image (HTML report)
-        if: github.event_name != 'push'
+        #if: github.event_name != 'push'
         uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.tags.outputs.TAG_SHA }}
@@ -974,7 +972,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
-        if: github.event_name != 'push'
+        #if: github.event_name != 'push'
         with:
           name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
