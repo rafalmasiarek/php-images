@@ -1627,7 +1627,7 @@ jobs:
             info = obj.get(php, {})
             value = info.get(field, "")
             print(value if value is not None else "")
-            PY
+          PY
           }
             
           urlencode() {
@@ -1635,7 +1635,7 @@ jobs:
             import sys
             from urllib.parse import quote
             print(quote(sys.argv[1], safe=""))
-            PY
+          PY
           }
 
           shields_endpoint() {
