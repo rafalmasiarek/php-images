@@ -228,6 +228,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Cache Trivy data
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install Trivy CLI
+        uses: aquasecurity/setup-trivy@v0.2.6
+
       - name: Build local candidate image
         uses: docker/build-push-action@v7
         with:
@@ -251,12 +260,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/sanityctl
-          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-1.2.0
+          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
 
       - name: Install sanityctl
         shell: bash
-        env:
-          SANITYCTL_VERSION: 1.2.0
         run: |
           set -euo pipefail
 
@@ -267,9 +274,9 @@ jobs:
             *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
           esac
 
-          cache_dir="${HOME}/.cache/sanityctl/v${SANITYCTL_VERSION}"
+          cache_dir="${HOME}/.cache/sanityctl"
           mkdir -p "$cache_dir"
-          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/v${SANITYCTL_VERSION}"
+          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
 
           if [ ! -f "${cache_dir}/${asset}" ]; then
             curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
@@ -281,7 +288,7 @@ jobs:
 
           grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
           sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
-          sanityctl --help
+          sanityctl --help &> /dev/null
 
       - name: Run sanityctl checks
         id: sanity
@@ -307,14 +314,17 @@ jobs:
           echo "path=$report" >> "$GITHUB_OUTPUT"
 
       - name: Trivy scan candidate (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ matrix.tag }}
-          format: json
-          output: trivy-results-pre.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results-pre.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "${{ matrix.tag }}"
 
       - name: Detect Alpine versions
         id: alpine
@@ -458,14 +468,17 @@ jobs:
             type=gha,mode=max,scope=${{ matrix.mm }}-${{ matrix.variant }}
 
       - name: Trivy scan final image (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ matrix.tag }}
-          format: json
-          output: trivy-results-post.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results-post.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "${{ matrix.tag }}"
 
       - name: Analyze remediation result
         id: remediation
