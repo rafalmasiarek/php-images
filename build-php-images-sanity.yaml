@@ -5,7 +5,7 @@ report:
 
 checks:
   - name: phpctl version exits successfully
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl version'
+    cmd: cat .sanity-cache/phpctl-version.txt
     expect:
       code: 0
       stdout:
@@ -13,7 +13,7 @@ checks:
           value: "phpctl"
 
   - name: phpctl info returns valid json
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json info'
+    cmd: cat .sanity-cache/phpctl-info.json
     parser: json
     expect:
       code: 0
@@ -32,7 +32,7 @@ checks:
           op: exists
 
   - name: php version matches expected branch
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json info'
+    cmd: cat .sanity-cache/phpctl-info.json
     parser: json
     expect:
       code: 0
@@ -42,19 +42,19 @@ checks:
           value: "${PHP_MM}."
 
   - name: phpctl ext versions returns valid json
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json ext versions'
+    cmd: cat .sanity-cache/phpctl-ext-versions.json
     parser: json
     expect:
       code: 0
 
   - name: phpctl ext list returns valid json
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'phpctl --output json ext list'
+    cmd: cat .sanity-cache/phpctl-ext-list.json
     parser: json
     expect:
       code: 0
 
   - name: php binary reports expected branch
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -v'
+    cmd: cat .sanity-cache/php-v.txt
     expect:
       code: 0
       stdout:
@@ -62,7 +62,7 @@ checks:
           value: "PHP ${PHP_MM}."
 
   - name: php module list works
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'php -m'
+    cmd: cat .sanity-cache/php-m.txt
     expect:
       code: 0
       stdout:
@@ -70,7 +70,7 @@ checks:
           value: "Core"
 
   - name: alpine release is present
-    cmd: docker run --rm "$IMAGE_TAG" sh -lc 'cat /etc/alpine-release'
+    cmd: cat .sanity-cache/alpine-release.txt
     expect:
       code: 0
       stdout:
@@ -82,12 +82,11 @@ checks:
       python3 - <<'PY'
       import json
       import os
-      import subprocess
       import sys
       from pathlib import Path
 
-      image = os.environ["IMAGE_TAG"]
       pecl_file = Path(os.environ["PECL_FILE"])
+      ext_list_file = Path(".sanity-cache/phpctl-ext-list.json")
 
       expected = []
       if pecl_file.exists():
@@ -101,14 +100,7 @@ checks:
           print("No expected PECL extensions listed in pecl.txt")
           raise SystemExit(0)
 
-      proc = subprocess.run(
-          ["docker", "run", "--rm", image, "sh", "-lc", "phpctl --output json ext list"],
-          check=True,
-          capture_output=True,
-          text=True,
-      )
-
-      rows = json.loads(proc.stdout)
+      rows = json.loads(ext_list_file.read_text(encoding="utf-8"))
 
       actual = {}
       for row in rows:

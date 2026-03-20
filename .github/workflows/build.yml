@@ -240,6 +240,35 @@ jobs:
       - name: Install Trivy CLI
         uses: aquasecurity/setup-trivy@v0.2.6
 
+      - name: Cache sanityctl
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/sanityctl
+          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install sanityctl
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) asset="sanityctl-linux-amd64" ;;
+            aarch64|arm64) asset="sanityctl-linux-arm64" ;;
+            *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+          esac
+          cache_dir="${HOME}/.cache/sanityctl"
+          mkdir -p "$cache_dir"
+          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
+          if [ ! -f "${cache_dir}/${asset}" ]; then
+            curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
+          fi
+          if [ ! -f "${cache_dir}/SHA256SUMS.txt" ]; then
+            curl -fsSL -o "${cache_dir}/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
+          fi
+          grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
+          sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
+          sanityctl --help &> /dev/null
+
       - name: Compute tags
         id: tags
         shell: bash
@@ -361,36 +390,32 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
 
-      - name: Cache sanityctl
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/sanityctl
-          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
-
-      - name: Install sanityctl
+      - name: Collect data for sanity checks
         shell: bash
+        env:
+          IMAGE_TAG: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
         run: |
           set -euo pipefail
-          arch="$(uname -m)"
-          case "$arch" in
-            x86_64|amd64) asset="sanityctl-linux-amd64" ;;
-            aarch64|arm64) asset="sanityctl-linux-arm64" ;;
-            *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
-          esac
-          cache_dir="${HOME}/.cache/sanityctl"
-          mkdir -p "$cache_dir"
-          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
-          if [ ! -f "${cache_dir}/${asset}" ]; then
-            curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
-          fi
-          if [ ! -f "${cache_dir}/SHA256SUMS.txt" ]; then
-            curl -fsSL -o "${cache_dir}/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
-          fi
-          grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
-          sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
-          sanityctl --help &> /dev/null
 
-      - name: Validate PHP version and expected PECL extensions with sanityctl
+          rm -rf .sanity-cache
+          mkdir -p .sanity-cache
+
+          docker run --rm \
+            -v "$PWD/.sanity-cache:/out" \
+            "$IMAGE_TAG" \
+            sh -lc '
+              set -euo pipefail
+
+              phpctl version > /out/phpctl-version.txt
+              phpctl --output json info > /out/phpctl-info.json
+              phpctl --output json ext versions > /out/phpctl-ext-versions.json
+              phpctl --output json ext list > /out/phpctl-ext-list.json
+              php -v > /out/php-v.txt
+              php -m > /out/php-m.txt
+              cat /etc/alpine-release > /out/alpine-release.txt
+            '
+
+      - name: Run sanityctl checks
         id: phpctl_check
         shell: bash
         env:
@@ -403,6 +428,7 @@ jobs:
           log="/tmp/phpctl-check-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
           {
+            echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
             echo "### sanityctl validation for ${IMAGE_TAG}"
             echo
             sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
@@ -776,6 +802,38 @@ jobs:
                 echo "- \`$cve\`"
               done
             fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Append security summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pre_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results-pre.json)"
+          pre_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results-pre.json)"
+          pre_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results-pre.json)"
+
+          post_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)"
+          post_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)"
+          post_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results.json)"
+
+          {
+            echo "### Security summary"
+            echo
+            echo "| Stage | Critical | High | Medium |"
+            echo "|---|---:|---:|---:|"
+            echo "| Before hotfixes | ${pre_critical} | ${pre_high} | ${pre_medium} |"
+            echo "| After hotfixes | ${post_critical} | ${post_high} | ${post_medium} |"
+            echo
+            echo "### Hotfix matching"
+            echo
+            echo "- Hotfix scripts selected: \`${{ steps.hotfixes.outputs.selected_count }}\`"
+            echo "- Matching hotfix CVEs found: \`${{ steps.hotfixes.outputs.matched_cves || 'none' }}\`"
+            echo "- Unmatched CVEs: \`${{ steps.hotfixes.outputs.unmatched_cves || 'none' }}\`"
+            echo "- Hotfix rebuild performed: \`${{ steps.hotfixes.outputs.enabled }}\`"
+            echo "- Fixed CVEs after rebuild: \`${{ steps.remediation.outputs.fixed_count }}\`"
+            echo "- Remaining CVEs after rebuild: \`${{ steps.remediation.outputs.remaining_count }}\`"
+            echo "- New CVEs after rebuild: \`${{ steps.remediation.outputs.new_count }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Print hotfix status

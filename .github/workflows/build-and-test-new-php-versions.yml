@@ -290,6 +290,31 @@ jobs:
           sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
           sanityctl --help &> /dev/null
 
+      - name: Collect data for sanity checks
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+
+          rm -rf .sanity-cache
+          mkdir -p .sanity-cache
+
+          docker run --rm \
+            -v "$PWD/.sanity-cache:/out" \
+            "$IMAGE_TAG" \
+            sh -lc '
+              set -euo pipefail
+
+              phpctl version > /out/phpctl-version.txt
+              phpctl --output json info > /out/phpctl-info.json
+              phpctl --output json ext versions > /out/phpctl-ext-versions.json
+              phpctl --output json ext list > /out/phpctl-ext-list.json
+              php -v > /out/php-v.txt
+              php -m > /out/php-m.txt
+              cat /etc/alpine-release > /out/alpine-release.txt
+            '
+
       - name: Run sanityctl checks
         id: sanity
         shell: bash
@@ -308,7 +333,7 @@ jobs:
             echo
             echo "**Image (local):** \`${{ matrix.tag }}\`"
             echo
-            sanityctl run -f build-php-images-sanity.yaml --output text --summary
+            sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
           } | tee "$report"
 
           echo "path=$report" >> "$GITHUB_OUTPUT"
