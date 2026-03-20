@@ -1,0 +1,13 @@
+{
+  "critical": 1,
+  "digest": "sha256:fc8230e27567a701c2c9390c32e7ee9ea6ccd5e927800460b3306965cc4906a4",
+  "high": 0,
+  "image_date": "ghcr.io/rafalmasiarek/php:8.3-fpm-2026-03-20",
+  "image_moving": "ghcr.io/rafalmasiarek/php:8.3-fpm",
+  "image_sha": "ghcr.io/rafalmasiarek/php:8.3-fpm-sha-58fb7d1",
+  "medium": 2,
+  "os": "3.22.3",
+  "php": "8.3",
+  "report_file": "trivy-8.3-fpm.html",
+  "variant": "fpm"
+}

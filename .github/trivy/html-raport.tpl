@@ -2,6 +2,7 @@
 <html>
   <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+{{- if . }}
     <style>
       * {
         font-family: Arial, Helvetica, sans-serif;
@@ -51,7 +52,7 @@
       }
       a.toggle-more-links { cursor: pointer; }
     </style>
-    <title>ghcr.io/rafalmasiarek/php:8.2-cli-sha-58fb7d1 (alpine 3.22.3) - Trivy Report - 2026-03-20 12:15:18.472209292 +0000 UTC m=+0.048586241 </title>
+    <title>{{- escapeXML ( index . 0 ).Target }} - Trivy Report - {{ now }} </title>
     <script>
       window.onload = function() {
         document.querySelectorAll('td.links').forEach(function(linkCell) {
@@ -81,9 +82,13 @@
     </script>
   </head>
   <body>
-    <h1>ghcr.io/rafalmasiarek/php:8.2-cli-sha-58fb7d1 (alpine 3.22.3) - Trivy Report - 2026-03-20 12:15:18.472236694 +0000 UTC m=+0.048613632</h1>
+    <h1>{{- escapeXML ( index . 0 ).Target }} - Trivy Report - {{ now }}</h1>
     <table>
-      <tr class="group-header"><th colspan="6">alpine</th></tr>
+    {{- range . }}
+      <tr class="group-header"><th colspan="6">{{ .Type | toString | escapeXML }}</th></tr>
+      {{- if (eq (len .Vulnerabilities) 0) }}
+      <tr><th colspan="6">No Vulnerabilities found</th></tr>
+      {{- else }}
       <tr class="sub-header">
         <th>Package</th>
         <th>Vulnerability ID</th>
@@ -92,48 +97,52 @@
         <th>Fixed Version</th>
         <th>Links</th>
       </tr>
-      <tr class="severity-CRITICAL">
-        <td class="pkg-name">libexpat</td>
-        <td>CVE-2026-32767</td>
-        <td class="severity">CRITICAL</td>
-        <td class="pkg-version">2.7.4-r0</td>
-        <td>2.7.5-r0</td>
+        {{- range .Vulnerabilities }}
+      <tr class="severity-{{ escapeXML .Vulnerability.Severity }}">
+        <td class="pkg-name">{{ escapeXML .PkgName }}</td>
+        <td>{{ escapeXML .VulnerabilityID }}</td>
+        <td class="severity">{{ escapeXML .Vulnerability.Severity }}</td>
+        <td class="pkg-version">{{ escapeXML .InstalledVersion }}</td>
+        <td>{{ escapeXML .FixedVersion }}</td>
         <td class="links" data-more-links="off">
-          <a href="https://github.com/siyuan-note/siyuan">https://github.com/siyuan-note/siyuan</a>
-          <a href="https://github.com/siyuan-note/siyuan/security/advisories/GHSA-j7wh-x834-p3r7">https://github.com/siyuan-note/siyuan/security/advisories/GHSA-j7wh-x834-p3r7</a>
+          {{- range .Vulnerability.References }}
+          <a href={{ escapeXML . | printf "%q" }}>{{ escapeXML . }}</a>
+          {{- end }}
         </td>
       </tr>
-      <tr class="severity-MEDIUM">
-        <td class="pkg-name">libexpat</td>
-        <td>CVE-2026-32777</td>
-        <td class="severity">MEDIUM</td>
-        <td class="pkg-version">2.7.4-r0</td>
-        <td>2.7.5-r0</td>
-        <td class="links" data-more-links="off">
-          <a href="https://access.redhat.com/security/cve/CVE-2026-32777">https://access.redhat.com/security/cve/CVE-2026-32777</a>
-          <a href="https://github.com/libexpat/libexpat/issues/1161">https://github.com/libexpat/libexpat/issues/1161</a>
-          <a href="https://github.com/libexpat/libexpat/pull/1159">https://github.com/libexpat/libexpat/pull/1159</a>
-          <a href="https://github.com/libexpat/libexpat/pull/1162">https://github.com/libexpat/libexpat/pull/1162</a>
-          <a href="https://issues.oss-fuzz.com/issues/486993411">https://issues.oss-fuzz.com/issues/486993411</a>
-          <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-32777">https://nvd.nist.gov/vuln/detail/CVE-2026-32777</a>
-          <a href="https://www.cve.org/CVERecord?id=CVE-2026-32777">https://www.cve.org/CVERecord?id=CVE-2026-32777</a>
-        </td>
-      </tr>
-      <tr class="severity-MEDIUM">
-        <td class="pkg-name">libexpat</td>
-        <td>CVE-2026-32778</td>
-        <td class="severity">MEDIUM</td>
-        <td class="pkg-version">2.7.4-r0</td>
-        <td>2.7.5-r0</td>
-        <td class="links" data-more-links="off">
-          <a href="https://access.redhat.com/security/cve/CVE-2026-32778">https://access.redhat.com/security/cve/CVE-2026-32778</a>
-          <a href="https://github.com/libexpat/libexpat/pull/1159">https://github.com/libexpat/libexpat/pull/1159</a>
-          <a href="https://github.com/libexpat/libexpat/pull/1163">https://github.com/libexpat/libexpat/pull/1163</a>
-          <a href="https://nvd.nist.gov/vuln/detail/CVE-2026-32778">https://nvd.nist.gov/vuln/detail/CVE-2026-32778</a>
-          <a href="https://www.cve.org/CVERecord?id=CVE-2026-32778">https://www.cve.org/CVERecord?id=CVE-2026-32778</a>
-        </td>
-      </tr>
+        {{- end }}
+      {{- end }}
+      {{- if (eq (len .Misconfigurations ) 0) }}
       <tr><th colspan="6">No Misconfigurations found</th></tr>
+      {{- else }}
+      <tr class="sub-header">
+        <th>Type</th>
+        <th>Misconf ID</th>
+        <th>Check</th>
+        <th>Severity</th>
+        <th>Message</th>
+      </tr>
+        {{- range .Misconfigurations }}
+      <tr class="severity-{{ escapeXML .Severity }}">
+        <td class="misconf-type">{{ escapeXML .Type }}</td>
+        <td>{{ escapeXML .ID }}</td>
+        <td class="misconf-check">{{ escapeXML .Title }}</td>
+        <td class="severity">{{ escapeXML .Severity }}</td>
+        <td class="link" data-more-links="off"  style="white-space:normal;">
+          {{ escapeXML .Message }}
+          <br>
+            <a href={{ escapeXML .PrimaryURL | printf "%q" }}>{{ escapeXML .PrimaryURL }}</a>
+          </br>
+        </td>
+      </tr>
+        {{- end }}
+      {{- end }}
+    {{- end }}
     </table>
+{{- else }}
+  </head>
+  <body>
+    <h1>Trivy Returned Empty Report</h1>
+{{- end }}
   </body>
 </html>

@@ -1,0 +1,13 @@
+{
+  "critical": 0,
+  "digest": "sha256:9c9b760cf0eafa7973e1c17a58cbf5014cd2e02be7cba9f83ff5cb931d7409c2",
+  "high": 0,
+  "image_date": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-20",
+  "image_moving": "ghcr.io/rafalmasiarek/php:8.5-cli",
+  "image_sha": "ghcr.io/rafalmasiarek/php:8.5-cli-sha-58fb7d1",
+  "medium": 0,
+  "os": "3.23.3",
+  "php": "8.5",
+  "report_file": "trivy-8.5-cli.html",
+  "variant": "cli"
+}

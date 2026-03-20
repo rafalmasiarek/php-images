@@ -99,20 +99,6 @@ def release_url_for_php(php: str) -> str:
     return f"https://github.com/{REPO}/releases/tag/php-{php}"
 
 
-def load_last_build(php: str) -> tuple[str, str]:
-    path = ROOT / "web" / "badges" / f"last-{php}.json"
-    if not path.exists():
-        return "-", "-"
-
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        date = str(obj.get("date") or "-")
-        sha = str(obj.get("sha") or "-")
-        return date or "-", sha or "-"
-    except Exception:
-        return "-", "-"
-
-
 def load_php_eol_data() -> dict[str, dict[str, str | bool]]:
     path = ROOT / "web" / "_data" / "php-eol.json"
     if not path.exists():
@@ -168,13 +154,12 @@ for dockerfile in sorted((ROOT / "versions").glob("*/*/Dockerfile")):
     }
 
 table = [
-    "| PHP | Version | EOL | Last build | SHA | Tags | OS | Trivy |",
-    "| - | - | - | - | - | - | - | - |",
+    "| PHP | Version | EOL | Tags | OS | Trivy |",
+    "| - | - | - | - | - | - |",
 ]
 
 for php in sorted(data.keys(), key=php_key):
     variants = data[php]
-    last_date, last_sha = load_last_build(php)
     eol_info = php_eol_data.get(php, {})
     version = str(eol_info.get("version") or php)
     eol = str(eol_info.get("eol") or "-")
@@ -198,10 +183,6 @@ for php in sorted(data.keys(), key=php_key):
         + f"`{version}`"
         + " | "
         + f"`{eol}`"
-        + " | "
-        + f"`{last_date}`"
-        + " | "
-        + f"`{last_sha}`"
         + " | "
         + "<br>".join(tags_lines)
         + " | "

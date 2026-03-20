@@ -2,15 +2,22 @@ name: build-and-test-new-php-versions
 
 on:
   pull_request:
+    branches: ["main"]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "versions/**"
+      - "rootfs/**"
+      - "hotfixes/**"
+      - "build-php-images-sanity.yaml"
       - ".github/workflows/build-and-test-new-php-versions.yml"
   push:
     branches:
       - "bot/add-php-*"
     paths:
       - "versions/**"
+      - "rootfs/**"
+      - "hotfixes/**"
+      - "build-php-images-sanity.yaml"
       - ".github/workflows/build-and-test-new-php-versions.yml"
 
 permissions:
@@ -18,8 +25,11 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: build-php-versions-${{ github.ref }}
+  group: build-php-versions-sanity-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  IMAGE_NAME: php
 
 jobs:
   discover:
@@ -33,72 +43,163 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute build matrix from changed Dockerfiles
+      - name: Compute build matrix from changed files
         id: matrix
         shell: bash
         run: |
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            head="${{ github.event.pull_request.head.sha }}"
-            base_ref="${{ github.event.pull_request.base.ref }}"
-
-            git fetch origin "$base_ref" --depth=1
-            base="$(git merge-base "origin/$base_ref" "$head")"
+            export BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            export HEAD_SHA="${{ github.event.pull_request.head.sha }}"
           else
-            base="${{ github.event.before }}"
-            head="${{ github.sha }}"
+            export BASE_SHA="${{ github.event.before }}"
+            export HEAD_SHA="${{ github.sha }}"
           fi
 
-          echo "BASE=$base"
-          echo "HEAD=$head"
-
-          changed="$(git diff --name-only "$base" "$head" | grep -E '^versions/[0-9]+\.[0-9]+/[^/]+/Dockerfile$' || true)"
-
-          echo "Changed Dockerfiles:"
-          printf '%s\n' "$changed"
-
-          if [ -z "${changed//[[:space:]]/}" ]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          export CHANGED="$changed"
-
-          MATRIX_JSON="$(python3 - <<'PY'
+          python3 - <<'PY'
           import json
           import os
           import re
+          import subprocess
+          from pathlib import Path
 
-          changed = os.environ["CHANGED"].splitlines()
+          root = Path("versions")
+
+          def all_dockerfiles():
+              return sorted(root.glob("*/*/Dockerfile"))
+
+          def dockerfiles_for_php(php: str):
+              php_dir = root / php
+              if not php_dir.exists():
+                  return []
+              return sorted(php_dir.glob("*/Dockerfile"))
+
+          def dockerfile_alpine_versions(dockerfile: Path):
+              text = dockerfile.read_text(encoding="utf-8", errors="ignore")
+              for line in text.splitlines():
+                  line = line.strip()
+                  if not line.upper().startswith("FROM "):
+                      continue
+
+                  m = re.search(r"alpine:([0-9]+\.[0-9]+\.[0-9]+)", line, re.IGNORECASE)
+                  if m:
+                      full = m.group(1)
+                      minor = ".".join(full.split(".")[:2])
+                      return full, minor
+
+                  m = re.search(r"alpine:([0-9]+\.[0-9]+)", line, re.IGNORECASE)
+                  if m:
+                      minor = m.group(1)
+                      return minor, minor
+
+                  m = re.search(r"alpine([0-9]+\.[0-9]+\.[0-9]+)", line, re.IGNORECASE)
+                  if m:
+                      full = m.group(1)
+                      minor = ".".join(full.split(".")[:2])
+                      return full, minor
+
+                  m = re.search(r"alpine([0-9]+\.[0-9]+)", line, re.IGNORECASE)
+                  if m:
+                      minor = m.group(1)
+                      return minor, minor
+
+              return "", ""
+
+          def dockerfiles_matching_alpine(version: str):
+              matched = []
+              for dockerfile in all_dockerfiles():
+                  full, minor = dockerfile_alpine_versions(dockerfile)
+                  if version and version in {full, minor}:
+                      matched.append(dockerfile)
+              return sorted(matched)
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+
+          out = subprocess.check_output(
+              ["git", "diff", "--name-only", base, head],
+              text=True,
+          )
+          changed = [line.strip() for line in out.splitlines() if line.strip()]
+
+          selected = set()
+          full_build = False
+
+          for path in changed:
+              parts = path.split("/")
+
+              if path.startswith("versions/"):
+                  if len(parts) >= 3:
+                      php = parts[1]
+                      variant = parts[2]
+                      dockerfile = root / php / variant / "Dockerfile"
+                      if dockerfile.exists():
+                          selected.add(str(dockerfile))
+                  continue
+
+              if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/all/"):
+                  full_build = True
+                  continue
+
+              if path.startswith("hotfixes/php/"):
+                  if len(parts) >= 4:
+                      php = parts[2]
+                      scope = parts[3]
+
+                      if scope == "all":
+                          for dockerfile in dockerfiles_for_php(php):
+                              selected.add(str(dockerfile))
+                      else:
+                          dockerfile = root / php / scope / "Dockerfile"
+                          if dockerfile.exists():
+                              selected.add(str(dockerfile))
+                  continue
+
+              if path.startswith("hotfixes/alpine/"):
+                  if len(parts) >= 3:
+                      alpine_ver = parts[2]
+                      if alpine_ver == "all":
+                          full_build = True
+                      else:
+                          for dockerfile in dockerfiles_matching_alpine(alpine_ver):
+                              selected.add(str(dockerfile))
+                  continue
+
+              if path.startswith("rootfs/"):
+                  full_build = True
+                  continue
+
+              if path in {
+                  "build-php-images-sanity.yaml",
+                  ".github/workflows/build-and-test-new-php-versions.yml",
+              }:
+                  full_build = True
+                  continue
+
+          dockerfiles = all_dockerfiles() if full_build else sorted(Path(p) for p in selected)
 
           include = []
-          for path in changed:
-            m = re.match(r"^versions/(\d+\.\d+)/([^/]+)/Dockerfile$", path)
-            if not m:
-              continue
+          for dockerfile in dockerfiles:
+              php = dockerfile.parts[1]
+              variant = dockerfile.parts[2]
+              include.append({
+                  "mm": php,
+                  "variant": variant,
+                  "context": f"versions/{php}/{variant}",
+                  "dockerfile": f"versions/{php}/{variant}/Dockerfile",
+                  "tag": f"local/php-{php}-{variant}:precheck",
+              })
 
-            mm = m.group(1)
-            variant = m.group(2)
-            include.append({
-              "mm": mm,
-              "variant": variant,
-              "context": f"versions/{mm}/{variant}",
-              "dockerfile": f"versions/{mm}/{variant}/Dockerfile",
-              "pecl_file": f"versions/{mm}/{variant}/pecl.txt",
-              "tag": f"local/php-{mm}-{variant}:report"
-            })
+          matrix = {"include": include}
 
-          print(json.dumps({"include": include}, separators=(",", ":")))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"has_changes={'true' if include else 'false'}\n")
+              fh.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
           PY
-          )"
-
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
 
   build:
-    name: build and report
+    name: build and check
     needs: discover
     if: needs.discover.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
@@ -109,62 +210,146 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Prepare lifecycle metadata
+      - name: Prepare lifecycle metadata and hotfix workspace
         shell: bash
         run: |
           set -euo pipefail
+
           cat > .lifecycle.env <<EOF
           PHP_BRANCH=${{ matrix.mm }}
           PHP_VERSION=${{ matrix.mm }}
           PHP_EOL=
-          IMAGE_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           EOF
 
-      - name: Prepare selected hotfix directory
-        shell: bash
-        run: |
-          set -euo pipefail
           rm -rf .hotfixes-selected
           mkdir -p .hotfixes-selected
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+          : > .hotfixes-selected-files.txt
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build (linux/amd64, linux/arm64) - validation only
-        uses: docker/build-push-action@v7
+      - name: Cache Trivy data
+        uses: actions/cache@v5
         with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          push: false
-          load: false
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            PECL_FILE=${{ matrix.context }}/pecl.txt
+          path: ~/.cache/trivy
+          key: trivy-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install Trivy CLI
+        uses: aquasecurity/setup-trivy@v0.2.6
 
       - name: Build local candidate image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          push: false
           load: true
+          push: false
+          pull: true
           platforms: linux/amd64
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: ${{ matrix.tag }}
+          provenance: false
+          sbom: false
+          cache-from: |
+            type=gha,scope=${{ matrix.mm }}-${{ matrix.variant }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.mm }}-${{ matrix.variant }}
+
+      - name: Cache sanityctl
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/sanityctl
+          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install sanityctl
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) asset="sanityctl-linux-amd64" ;;
+            aarch64|arm64) asset="sanityctl-linux-arm64" ;;
+            *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+          esac
+
+          cache_dir="${HOME}/.cache/sanityctl"
+          mkdir -p "$cache_dir"
+          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
+
+          if [ ! -f "${cache_dir}/${asset}" ]; then
+            curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
+          fi
+
+          if [ ! -f "${cache_dir}/SHA256SUMS.txt" ]; then
+            curl -fsSL -o "${cache_dir}/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
+          fi
+
+          grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
+          sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
+          sanityctl --help &> /dev/null
+
+      - name: Collect data for sanity checks
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+
+          rm -rf .sanity-cache
+          mkdir -p .sanity-cache
+
+          docker run --rm \
+            -v "$PWD/.sanity-cache:/out" \
+            "$IMAGE_TAG" \
+            sh -lc '
+              set -euo pipefail
+
+              phpctl version > /out/phpctl-version.txt
+              phpctl --output json info > /out/phpctl-info.json
+              phpctl --output json ext versions > /out/phpctl-ext-versions.json
+              phpctl --output json ext list > /out/phpctl-ext-list.json
+              php -v > /out/php-v.txt
+              php -m > /out/php-m.txt
+              cat /etc/alpine-release > /out/alpine-release.txt
+            '
+
+      - name: Run sanityctl checks
+        id: sanity
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ matrix.tag }}
+          PHP_MM: ${{ matrix.mm }}
+          PECL_FILE: versions/${{ matrix.mm }}/${{ matrix.variant }}/pecl.txt
+        run: |
+          set -euo pipefail
+
+          report="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
+
+          {
+            echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
+            echo "## PHP PR check: \`${{ matrix.mm }}\` / \`${{ matrix.variant }}\`"
+            echo
+            echo "**Image (local):** \`${{ matrix.tag }}\`"
+            echo
+            sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
+          } | tee "$report"
+
+          echo "path=$report" >> "$GITHUB_OUTPUT"
 
       - name: Trivy scan candidate (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ matrix.tag }}
-          format: json
-          output: trivy-results-pre.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results-pre.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "${{ matrix.tag }}"
 
       - name: Detect Alpine versions
         id: alpine
@@ -172,55 +357,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 - <<'PY' > /tmp/alpine_versions.env
-          import re
-          import subprocess
-          from pathlib import Path
+          DOCKERFILE_ALPINE_FULL="$(
+            awk '
+              BEGIN { IGNORECASE=1 }
+              /^FROM[[:space:]]+/ {
+                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+              }
+            ' "${{ matrix.dockerfile }}" || true
+          )"
+          DOCKERFILE_ALPINE_FULL="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | tr -d '\r\n')"
 
-          dockerfile_path = Path("${{ matrix.dockerfile }}")
-          content = dockerfile_path.read_text(encoding="utf-8", errors="replace")
+          DOCKERFILE_ALPINE_MINOR=""
+          if [ -n "$DOCKERFILE_ALPINE_FULL" ]; then
+            DOCKERFILE_ALPINE_MINOR="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
 
-          dockerfile_full = ""
-          for line in content.splitlines():
-              if not re.match(r"^\s*FROM\s+", line, flags=re.IGNORECASE):
-                  continue
-              m = re.search(r"alpine:([0-9]+\.[0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
-              if m:
-                  dockerfile_full = m.group(1)
-                  break
-              m = re.search(r"alpine:([0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
-              if m:
-                  dockerfile_full = m.group(1)
-                  break
-              m = re.search(r"alpine([0-9]+\.[0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
-              if m:
-                  dockerfile_full = m.group(1)
-                  break
-              m = re.search(r"alpine([0-9]+\.[0-9]+)", line, flags=re.IGNORECASE)
-              if m:
-                  dockerfile_full = m.group(1)
-                  break
+          IMAGE_ALPINE_FULL="$(
+            docker run --rm --entrypoint /bin/sh "${{ matrix.tag }}" -lc 'cat /etc/alpine-release' || true
+          )"
+          IMAGE_ALPINE_FULL="$(printf '%s' "$IMAGE_ALPINE_FULL" | tr -d '\r\n')"
 
-          dockerfile_minor = ".".join(dockerfile_full.split(".")[:2]) if dockerfile_full else ""
+          IMAGE_ALPINE_MINOR=""
+          if [ -n "$IMAGE_ALPINE_FULL" ]; then
+            IMAGE_ALPINE_MINOR="$(printf '%s' "$IMAGE_ALPINE_FULL" | cut -d. -f1,2)"
+          fi
 
-          try:
-              image_full = subprocess.check_output(
-                  ["docker", "run", "--rm", "--entrypoint", "/bin/sh", "${{ matrix.tag }}", "-lc", "cat /etc/alpine-release"],
-                  text=True,
-                  stderr=subprocess.DEVNULL,
-              ).strip()
-          except Exception:
-              image_full = ""
-
-          image_minor = ".".join(image_full.split(".")[:2]) if image_full else ""
-
-          print(f"dockerfile_full={dockerfile_full}")
-          print(f"dockerfile_minor={dockerfile_minor}")
-          print(f"image_full={image_full}")
-          print(f"image_minor={image_minor}")
-          PY
-
-          cat /tmp/alpine_versions.env >> "$GITHUB_OUTPUT"
+          {
+            printf 'dockerfile_full=%s\n' "$DOCKERFILE_ALPINE_FULL"
+            printf 'dockerfile_minor=%s\n' "$DOCKERFILE_ALPINE_MINOR"
+            printf 'image_full=%s\n' "$IMAGE_ALPINE_FULL"
+            printf 'image_minor=%s\n' "$IMAGE_ALPINE_MINOR"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Select matching hotfixes
         id: hotfixes
@@ -230,6 +400,7 @@ jobs:
 
           rm -rf .hotfixes-selected
           mkdir -p .hotfixes-selected
+          : > .hotfixes-selected-files.txt
 
           mapfile -t CVES < <(
             jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
@@ -272,6 +443,7 @@ jobs:
                 dest=".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
                 cp "$f" "$dest"
                 SELECTED_FILES+=("$f")
+                printf '%s\n' "$f" >> .hotfixes-selected-files.txt
                 matched_this_cve=1
                 found=1
               done
@@ -306,22 +478,32 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          push: false
           load: true
+          push: false
+          pull: true
           platforms: linux/amd64
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: ${{ matrix.tag }}
+          provenance: false
+          sbom: false
+          cache-from: |
+            type=gha,scope=${{ matrix.mm }}-${{ matrix.variant }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.mm }}-${{ matrix.variant }}
 
       - name: Trivy scan final image (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ matrix.tag }}
-          format: json
-          output: trivy-results-post.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results-post.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "${{ matrix.tag }}"
 
       - name: Analyze remediation result
         id: remediation
@@ -377,448 +559,46 @@ jobs:
           echo "remaining_count=${#REMAINING_CVES[@]}" >> "$GITHUB_OUTPUT"
           echo "new_count=${#NEW_CVES[@]}" >> "$GITHUB_OUTPUT"
 
-      - name: Run phpctl smoke tests
-        id: phpctl_smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          img="${{ matrix.tag }}"
-          log="/tmp/phpctl-smoke-${{ matrix.mm }}-${{ matrix.variant }}.txt"
-
-          {
-            echo "### phpctl smoke tests for $img"
-            echo
-
-            echo "== phpctl version =="
-            docker run --rm "$img" sh -lc 'phpctl version'
-
-            echo
-            echo "== phpctl help =="
-            docker run --rm "$img" sh -lc 'phpctl help | sed -n "1,25p"'
-
-            echo
-            echo "== phpctl json version =="
-            docker run --rm "$img" sh -lc 'phpctl --output json version'
-
-            echo
-            echo "== phpctl json info =="
-            docker run --rm "$img" sh -lc 'phpctl --output json info'
-
-            echo
-            echo "== phpctl json paths =="
-            docker run --rm "$img" sh -lc 'phpctl --output json paths'
-
-            echo
-            echo "== phpctl json doctor =="
-            docker run --rm "$img" sh -lc 'phpctl --output json doctor'
-
-            echo
-            echo "== phpctl json self-test =="
-            docker run --rm "$img" sh -lc 'phpctl --output json self-test'
-
-            echo
-            echo "== phpctl json ext list =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext list'
-
-            echo
-            echo "== phpctl json ext versions =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext versions'
-
-            echo
-            echo "== phpctl ext detect gd =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect gd'
-
-            echo
-            echo "== phpctl ext detect redis =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect redis || true'
-
-            echo
-            echo "== phpctl ini show =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini show'
-
-            echo
-            echo "== phpctl ini get memory_limit =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini get memory_limit'
-
-            if [ "${{ matrix.variant }}" = "fpm" ]; then
-              echo
-              echo "== phpctl fpm status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm status'
-
-              echo
-              echo "== phpctl fpm test =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm test || true'
-
-              echo
-              echo "== phpctl fpm pool render =="
-              docker run --rm "$img" sh -lc 'phpctl fpm pool render smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke'
-
-              echo
-              echo "== phpctl fpm pool create/show/enable/disable/delete =="
-              docker run --rm "$img" sh -lc '
-                set -eu
-                phpctl fpm pool create smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke
-                phpctl --output json fpm pool show smoke
-                phpctl --output json fpm pool enable smoke
-                phpctl --output json fpm pool disable smoke
-                phpctl --output json fpm pool delete smoke
-              '
-            else
-              echo
-              echo "== phpctl status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json status || true'
-
-              echo
-              echo "== phpctl health =="
-              docker run --rm "$img" sh -lc 'phpctl --output json health || true'
-
-              echo
-              echo "== phpctl metrics =="
-              docker run --rm "$img" sh -lc 'phpctl metrics | sed -n "1,30p" || true'
-            fi
-          } | tee "$log"
-
-          echo "log=$log" >> "$GITHUB_OUTPUT"
-
-      - name: Collect phpctl outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          img="${{ matrix.tag }}"
-
-          docker run --rm "$img" sh -lc 'phpctl version' > /tmp/phpctl-version.txt
-          docker run --rm "$img" sh -lc 'phpctl --output json info' > /tmp/phpctl-info.json
-          docker run --rm "$img" sh -lc 'phpctl --output json paths' > /tmp/phpctl-paths.json
-          docker run --rm "$img" sh -lc 'phpctl --output json doctor' > /tmp/phpctl-doctor.json
-          docker run --rm "$img" sh -lc 'phpctl --output json self-test' > /tmp/phpctl-self-test.json
-          docker run --rm "$img" sh -lc 'phpctl --output json ini show' > /tmp/phpctl-ini-show.json
-          docker run --rm "$img" sh -lc 'phpctl --output json ext list' > /tmp/phpctl-ext-list.json
-          docker run --rm "$img" sh -lc 'phpctl --output json ext so-list' > /tmp/phpctl-ext-so-list.json
-
-          if [ "${{ matrix.variant }}" = "fpm" ]; then
-            docker run --rm "$img" sh -lc 'phpctl --output json fpm status' > /tmp/phpctl-fpm-status.json || echo '{}' > /tmp/phpctl-fpm-status.json
-          else
-            echo '{}' > /tmp/phpctl-fpm-status.json
-          fi
-
-      - name: Generate PHP and security report
-        id: report
+      - name: Append security summary to PR report
         shell: bash
         env:
-          HOTFIX_ENABLED: ${{ steps.hotfixes.outputs.enabled }}
-          HOTFIX_MATCHED_CVES: ${{ steps.hotfixes.outputs.matched_cves }}
-          HOTFIX_UNMATCHED_CVES: ${{ steps.hotfixes.outputs.unmatched_cves }}
-          HOTFIX_SELECTED_COUNT: ${{ steps.hotfixes.outputs.selected_count }}
-          REM_FIXED_COUNT: ${{ steps.remediation.outputs.fixed_count }}
-          REM_REMAINING_COUNT: ${{ steps.remediation.outputs.remaining_count }}
-          REM_NEW_COUNT: ${{ steps.remediation.outputs.new_count }}
-          PHP_MM: ${{ matrix.mm }}
-          PHP_VARIANT: ${{ matrix.variant }}
-          IMAGE_TAG: ${{ matrix.tag }}
-          PECL_FILE_PATH: ${{ matrix.pecl_file }}
-          PHPCTL_SMOKE_LOG: ${{ steps.phpctl_smoke.outputs.log }}
+          REPORT_PATH: ${{ steps.sanity.outputs.path }}
         run: |
           set -euo pipefail
-          out="/tmp/php-report-${{ matrix.mm }}-${{ matrix.variant }}.md"
 
-          python3 - <<'PY' > "$out"
-          import json
-          import os
-          from pathlib import Path
+          pre_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results-pre.json)"
+          pre_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results-pre.json)"
+          pre_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results-pre.json)"
 
-          def load_json(path):
-              with open(path, "r", encoding="utf-8") as fh:
-                  return json.load(fh)
+          post_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results-post.json)"
+          post_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results-post.json)"
+          post_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results-post.json)"
 
-          def counts(obj):
-              result = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0}
-              for res in obj.get("Results", []) or []:
-                  for vuln in res.get("Vulnerabilities", []) or []:
-                      sev = str(vuln.get("Severity") or "").upper()
-                      if sev in result:
-                          result[sev] += 1
-              return result
-
-          severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
-
-          def remaining_rows(obj):
-              rows = []
-              seen = set()
-              for res in obj.get("Results", []) or []:
-                  for vuln in res.get("Vulnerabilities", []) or []:
-                      sev = str(vuln.get("Severity") or "UNKNOWN").upper()
-                      if sev not in ("CRITICAL", "HIGH", "MEDIUM"):
-                          continue
-                      vid = str(vuln.get("VulnerabilityID") or "")
-                      pkg = str(vuln.get("PkgName") or "")
-                      installed = str(vuln.get("InstalledVersion") or "")
-                      fixed = str(vuln.get("FixedVersion") or "")
-                      key = (vid, pkg, installed, fixed, sev)
-                      if key in seen:
-                          continue
-                      seen.add(key)
-                      rows.append({
-                          "id": vid,
-                          "pkg": pkg,
-                          "severity": sev,
-                          "installed": installed,
-                          "fixed": fixed,
-                      })
-              rows.sort(key=lambda r: (severity_rank.get(r["severity"], 9), r["pkg"], r["id"]))
-              return rows
-
-          def load_expected_pecl(path):
-              items = []
-              p = Path(path)
-              if not p.exists():
-                  return items
-              for raw in p.read_text(encoding="utf-8").splitlines():
-                  line = raw.strip()
-                  if not line or line.startswith("#"):
-                      continue
-                  items.append(line)
-              return items
-
-          def yesno_to_emoji(value):
-              return "✅" if value else "❌"
-
-          def md_escape(text):
-              return str(text).replace("|", "\\|")
-
-          pre = load_json("trivy-results-pre.json")
-          post = load_json("trivy-results-post.json")
-          info = load_json("/tmp/phpctl-info.json")
-          paths = load_json("/tmp/phpctl-paths.json")
-          doctor = load_json("/tmp/phpctl-doctor.json")
-          self_test = load_json("/tmp/phpctl-self-test.json")
-          ini_show = load_json("/tmp/phpctl-ini-show.json")
-          ext_list = load_json("/tmp/phpctl-ext-list.json")
-          so_list = load_json("/tmp/phpctl-ext-so-list.json")
-          fpm_status = load_json("/tmp/phpctl-fpm-status.json")
-
-          phpctl_version = Path("/tmp/phpctl-version.txt").read_text(encoding="utf-8").strip()
-          expected = load_expected_pecl(os.environ["PECL_FILE_PATH"])
-          smoke_log = Path(os.environ["PHPCTL_SMOKE_LOG"]).read_text(encoding="utf-8") if os.environ.get("PHPCTL_SMOKE_LOG") else ""
-
-          pre_counts = counts(pre)
-          post_counts = counts(post)
-          rows = remaining_rows(post)[:15]
-
-          hotfix_enabled = os.environ.get("HOTFIX_ENABLED", "")
-          matched = [x for x in os.environ.get("HOTFIX_MATCHED_CVES", "").split(",") if x]
-          unmatched = [x for x in os.environ.get("HOTFIX_UNMATCHED_CVES", "").split(",") if x]
-          selected_count = os.environ.get("HOTFIX_SELECTED_COUNT", "0")
-          fixed_count = os.environ.get("REM_FIXED_COUNT", "0")
-          remaining_count = os.environ.get("REM_REMAINING_COUNT", "0")
-          new_count = os.environ.get("REM_NEW_COUNT", "0")
-
-          actual_map = {}
-          for row in ext_list:
-              name = str(row.get("name") or "").strip()
-              if not name:
-                  continue
-              actual_map[name] = {
-                  "available": bool(row.get("available")),
-                  "active": bool(row.get("active")),
-                  "loaded": bool(row.get("loaded")),
-                  "version": str(row.get("version") or "-"),
-                  "available_ini": str(row.get("available_ini") or "-"),
-                  "active_ini": str(row.get("active_ini") or "-"),
-              }
-
-          ext_names = sorted(set(expected) | set(actual_map.keys()), key=lambda s: s.lower())
-
-          expected_missing = []
-          unexpected_installed = []
-          active_not_loaded = []
-
-          for name in ext_names:
-              expected_flag = name in expected
-              actual = actual_map.get(name, {})
-              available = bool(actual.get("available"))
-              active = bool(actual.get("active"))
-              loaded = bool(actual.get("loaded"))
-
-              if expected_flag and not available:
-                  expected_missing.append(name)
-              if (not expected_flag) and available:
-                  unexpected_installed.append(name)
-              if active and not loaded:
-                  active_not_loaded.append(name)
-
-          print(f"<!-- php-report:{os.environ['PHP_MM']}:{os.environ['PHP_VARIANT']} -->")
-          print(f"## PHP report: `{os.environ['PHP_MM']}` / `{os.environ['PHP_VARIANT']}`")
-          print()
-          print(f"**Image (local):** `{os.environ['IMAGE_TAG']}`")
-          print()
-          print(f"**phpctl:** `{phpctl_version}`")
-          print()
-          print("### phpctl smoke tests")
-          print()
-          print("- Overall result: `passed`")
-          print()
-          print("<details>")
-          print("<summary>Show phpctl smoke test log</summary>")
-          print()
-          print("```text")
-          print(smoke_log.rstrip())
-          print("```")
-          print()
-          print("</details>")
-          print()
-          print("### Security summary")
-          print()
-          print("| Stage | Critical | High | Medium |")
-          print("|---|---:|---:|---:|")
-          print(f"| Before hotfixes | {pre_counts['CRITICAL']} | {pre_counts['HIGH']} | {pre_counts['MEDIUM']} |")
-          print(f"| After hotfixes | {post_counts['CRITICAL']} | {post_counts['HIGH']} | {post_counts['MEDIUM']} |")
-          print()
-          print("### Hotfix matching")
-          print()
-          print(f"- Hotfix scripts selected: `{selected_count}`")
-          print(f"- Matching hotfix CVEs found: `{'yes' if matched else 'no'}`")
-          print(f"- Hotfix rebuild performed: `{'yes' if hotfix_enabled == 'true' else 'no'}`")
-          print(f"- Fixed CVEs after rebuild: `{fixed_count}`")
-          print(f"- Remaining CVEs after rebuild: `{remaining_count}`")
-          print(f"- New CVEs after rebuild: `{new_count}`")
-          print()
-
-          if matched:
-              shown = ", ".join(f"`{x}`" for x in matched[:20])
-              print(f"- Matched CVEs: {shown}")
-          else:
-              print("- Matched CVEs: none")
-
-          if unmatched:
-              shown = ", ".join(f"`{x}`" for x in unmatched[:20])
-              print(f"- Unmatched CVEs: {shown}")
-          else:
-              print("- Unmatched CVEs: none")
-
-          print()
-          print("### Top remaining CVEs")
-          print()
-
-          if rows:
-              print("| CVE | Severity | Package | Installed | Fixed version |")
-              print("|---|---|---|---|---|")
-              for row in rows:
-                  fixed = row["fixed"] if row["fixed"] else "-"
-                  installed = row["installed"] if row["installed"] else "-"
-                  pkg = row["pkg"] if row["pkg"] else "-"
-                  vid = row["id"] if row["id"] else "-"
-                  print(f"| `{md_escape(vid)}` | `{md_escape(row['severity'])}` | `{md_escape(pkg)}` | `{md_escape(installed)}` | `{md_escape(fixed)}` |")
-          else:
-              print("No CRITICAL/HIGH/MEDIUM CVEs detected after rebuild.")
-
-          print()
-          print("### Runtime info")
-          print()
-          print("| Key | Value |")
-          print("|---|---|")
-          print(f"| PHP version | `{md_escape(info.get('php_version', '-'))}` |")
-          print(f"| PHP SAPI | `{md_escape(info.get('php_sapi', '-'))}` |")
-          print(f"| PHP binary | `{md_escape(info.get('php_bin', '-'))}` |")
-          print(f"| PHP-FPM binary | `{md_escape(info.get('php_fpm_bin', '-'))}` |")
-          print(f"| Loaded php.ini | `{md_escape(info.get('loaded_ini', '-'))}` |")
-          print(f"| INI scan dir | `{md_escape(info.get('ini_scan_dir', '-'))}` |")
-          print(f"| Extension dir | `{md_escape(info.get('extension_dir', '-'))}` |")
-          print(f"| Parsed ini files | `{md_escape(ini_show.get('parsed_files_count', '0'))}` |")
-
-          print()
-          print("### phpctl diagnostics")
-          print()
-          print("| Key | Value |")
-          print("|---|---|")
-          print(f"| ext available dir | `{md_escape(paths.get('ext_available_dir', '-'))}` |")
-          print(f"| ext active dir | `{md_escape(paths.get('ext_active_dir', '-'))}` |")
-          print(f"| fpm pool available dir | `{md_escape(paths.get('fpm_pool_available_dir', '-'))}` |")
-          print(f"| fpm pool active dir | `{md_escape(paths.get('fpm_pool_active_dir', '-'))}` |")
-          print(f"| doctor php_fpm_bin | `{md_escape(str(doctor.get('php_fpm_bin', '-')) if isinstance(doctor, dict) else '-')}` |")
-          print(f"| self-test php_fpm_test | `{md_escape(str(self_test.get('php_fpm_test', '-')) if isinstance(self_test, dict) else '-')}` |")
-
-          if os.environ["PHP_VARIANT"] == "fpm":
-              print(f"| fpm available | `{md_escape(str(fpm_status.get('available', '-')) if isinstance(fpm_status, dict) else '-')}` |")
-              print(f"| fpm config ok | `{md_escape(str(fpm_status.get('config_ok', '-')) if isinstance(fpm_status, dict) else '-')}` |")
-
-          print()
-          print("### Extension status")
-          print()
-          print("| Extension | Expected | Installed | Enabled | Loaded | Version | Available ini | Active ini |")
-          print("|---|---|---|---|---|---|---|---|")
-          for name in ext_names:
-              actual = actual_map.get(name, {})
-              expected_flag = name in expected
-              installed = bool(actual.get("available"))
-              active = bool(actual.get("active"))
-              loaded = bool(actual.get("loaded"))
-              version = actual.get("version", "-")
-              available_ini = actual.get("available_ini", "-")
-              active_ini = actual.get("active_ini", "-")
-              print(
-                  f"| `{md_escape(name)}` | {yesno_to_emoji(expected_flag)} | {yesno_to_emoji(installed)} | "
-                  f"{yesno_to_emoji(active)} | {yesno_to_emoji(loaded)} | `{md_escape(version)}` | "
-                  f"`{md_escape(available_ini)}` | `{md_escape(active_ini)}` |"
-              )
-
-          print()
-          print("### Extension summary")
-          print()
-          print(f"- Expected extensions from `pecl.txt`: `{len(expected)}`")
-          print(f"- Discovered extensions from image: `{len(actual_map)}`")
-          print(f"- Expected but not installed: `{len(expected_missing)}`")
-          print(f"- Installed but not expected: `{len(unexpected_installed)}`")
-          print(f"- Enabled but not loaded: `{len(active_not_loaded)}`")
-
-          if expected_missing:
-              shown = ", ".join(f"`{md_escape(x)}`" for x in expected_missing[:30])
-              print(f"- Missing expected extensions: {shown}")
-          else:
-              print("- Missing expected extensions: none")
-
-          if unexpected_installed:
-              shown = ", ".join(f"`{md_escape(x)}`" for x in unexpected_installed[:30])
-              print(f"- Unexpected installed extensions: {shown}")
-          else:
-              print("- Unexpected installed extensions: none")
-
-          if active_not_loaded:
-              shown = ", ".join(f"`{md_escape(x)}`" for x in active_not_loaded[:30])
-              print(f"- Enabled but not loaded: {shown}")
-          else:
-              print("- Enabled but not loaded: none")
-
-          print()
-          print("### Shared objects in extension_dir")
-          print()
-
-          if so_list:
-              print("| Module | Path | Size (bytes) |")
-              print("|---|---|---:|")
-              for row in so_list:
-                  name = str(row.get("name") or "-")
-                  path = str(row.get("path") or "-")
-                  size = str(row.get("size") or "-")
-                  print(f"| `{md_escape(name)}` | `{md_escape(path)}` | `{md_escape(size)}` |")
-          else:
-              print("No `.so` files found in extension_dir.")
-          PY
-
-          echo "path=$out" >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "### Security summary"
+            echo
+            echo "| Stage | Critical | High | Medium |"
+            echo "|---|---:|---:|---:|"
+            echo "| Before hotfixes | ${pre_critical} | ${pre_high} | ${pre_medium} |"
+            echo "| After hotfixes | ${post_critical} | ${post_high} | ${post_medium} |"
+            echo
+            echo "### Hotfix matching"
+            echo
+            echo "- Hotfix scripts selected: \`${{ steps.hotfixes.outputs.selected_count }}\`"
+            echo "- Matching hotfix CVEs found: \`${{ steps.hotfixes.outputs.matched_cves || 'none' }}\`"
+            echo "- Unmatched CVEs: \`${{ steps.hotfixes.outputs.unmatched_cves || 'none' }}\`"
+            echo "- Hotfix rebuild performed: \`${{ steps.hotfixes.outputs.enabled }}\`"
+            echo "- Fixed CVEs after rebuild: \`${{ steps.remediation.outputs.fixed_count }}\`"
+            echo "- Remaining CVEs after rebuild: \`${{ steps.remediation.outputs.remaining_count }}\`"
+            echo "- New CVEs after rebuild: \`${{ steps.remediation.outputs.new_count }}\`"
+          } >> "$REPORT_PATH"
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v7
         with:
           name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
-          path: ${{ steps.report.outputs.path }}
-
-      - name: Upload phpctl smoke log artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: phpctl-smoke-${{ matrix.mm }}-${{ matrix.variant }}
-          path: ${{ steps.phpctl_smoke.outputs.log }}
+          path: ${{ steps.sanity.outputs.path }}
 
       - name: Upload Trivy pre-scan artifact
         uses: actions/upload-artifact@v7
@@ -839,7 +619,7 @@ jobs:
           script: |
             const fs = require('fs');
 
-            const body = fs.readFileSync('${{ steps.report.outputs.path }}', 'utf8');
+            const body = fs.readFileSync('${{ steps.sanity.outputs.path }}', 'utf8');
             const marker = `<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->`;
 
             const { owner, repo } = context.repo;
@@ -871,18 +651,18 @@ jobs:
             }
 
   skip:
-    name: build and report (no changes)
+    name: build and check (no changes)
     needs: discover
     if: needs.discover.outputs.has_changes != 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: No version Dockerfiles changed
+      - name: No affected variants changed
         shell: bash
         run: |
-          echo "No changes detected in versions/*/*/Dockerfile. Skipping build."
+          echo "No affected PHP image variants detected. Skipping build."
 
   ci:
-    name: build-php-versions (required)
+    name: build-php-versions-sanity (required)
     needs: [discover, build, skip]
     if: always()
     runs-on: ubuntu-latest

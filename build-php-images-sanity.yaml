@@ -1,0 +1,181 @@
+report:
+  status_labels:
+    passed: PASS ✅
+    failed: FAIL ⛔
+
+checks:
+  - name: phpctl version exits successfully
+    cmd: cat .sanity-cache/phpctl-version.txt
+    expect:
+      code: 0
+      stdout:
+        - op: contains
+          value: "phpctl"
+
+  - name: phpctl info returns valid json
+    cmd: cat .sanity-cache/phpctl-info.json
+    parser: json
+    expect:
+      code: 0
+      json:
+        - path: php_version
+          op: exists
+        - path: php_sapi
+          op: exists
+        - path: php_bin
+          op: exists
+        - path: loaded_ini
+          op: exists
+        - path: ini_scan_dir
+          op: exists
+        - path: extension_dir
+          op: exists
+
+  - name: php version matches expected branch
+    cmd: cat .sanity-cache/phpctl-info.json
+    parser: json
+    expect:
+      code: 0
+      json:
+        - path: php_version
+          op: startswith
+          value: "${PHP_MM}."
+
+  - name: phpctl ext versions returns valid json
+    cmd: cat .sanity-cache/phpctl-ext-versions.json
+    parser: json
+    expect:
+      code: 0
+
+  - name: phpctl ext list returns valid json
+    cmd: cat .sanity-cache/phpctl-ext-list.json
+    parser: json
+    expect:
+      code: 0
+
+  - name: php binary reports expected branch
+    cmd: cat .sanity-cache/php-v.txt
+    expect:
+      code: 0
+      stdout:
+        - op: contains
+          value: "PHP ${PHP_MM}."
+
+  - name: php module list works
+    cmd: cat .sanity-cache/php-m.txt
+    expect:
+      code: 0
+      stdout:
+        - op: contains
+          value: "Core"
+
+  - name: alpine release is present
+    cmd: cat .sanity-cache/alpine-release.txt
+    expect:
+      code: 0
+      stdout:
+        - op: regex
+          value: '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+
+  - name: expected extensions from pecl.txt are available and not enabled by default
+    cmd: |
+      python3 - <<'PY'
+      import json
+      import os
+      import sys
+      from pathlib import Path
+
+      pecl_file = Path(os.environ["PECL_FILE"])
+      ext_list_file = Path(".sanity-cache/phpctl-ext-list.json")
+
+      expected = []
+      if pecl_file.exists():
+          for raw in pecl_file.read_text(encoding="utf-8").splitlines():
+              line = raw.strip()
+              if not line or line.startswith("#"):
+                  continue
+              expected.append(line)
+
+      if not expected:
+          print("No expected PECL extensions listed in pecl.txt")
+          raise SystemExit(0)
+
+      rows = json.loads(ext_list_file.read_text(encoding="utf-8"))
+
+      actual = {}
+      for row in rows:
+          name = str(row.get("name") or "").strip()
+          if name:
+              actual[name.lower()] = row
+
+      missing_available = []
+      unexpectedly_active = []
+      unexpectedly_loaded = []
+
+      print(f"expected={len(expected)}")
+      print(f"listed={len(actual)}")
+
+      for name in expected:
+          row = actual.get(name.lower())
+          if not row:
+              missing_available.append(name)
+              print(f"MISSING {name}", file=sys.stderr)
+              continue
+
+          available = row.get("available")
+          active = row.get("active")
+          loaded = row.get("loaded")
+          version = row.get("version", "-")
+          available_ini = row.get("available_ini", "-")
+          active_ini = row.get("active_ini", "-")
+
+          is_available = available is True or str(available).lower() == "yes"
+          is_active = active is True or str(active).lower() == "yes"
+          is_loaded = loaded is True or str(loaded).lower() == "yes"
+
+          if not is_available:
+              missing_available.append(name)
+
+          if is_active:
+              unexpectedly_active.append(name)
+
+          if is_loaded:
+              unexpectedly_loaded.append(name)
+
+          print(
+              f"EXT {name} "
+              f"available={is_available} "
+              f"active={is_active} "
+              f"loaded={is_loaded} "
+              f"version={version!r} "
+              f"available_ini={available_ini!r} "
+              f"active_ini={active_ini!r}"
+          )
+
+      print(f"missing_available={len(missing_available)}")
+      print(f"unexpectedly_active={len(unexpectedly_active)}")
+      print(f"unexpectedly_loaded={len(unexpectedly_loaded)}")
+
+      if missing_available:
+          print(
+              "Extensions not available to enable: " + ", ".join(missing_available),
+              file=sys.stderr,
+          )
+
+      if unexpectedly_active:
+          print(
+              "Extensions unexpectedly active by default: " + ", ".join(unexpectedly_active),
+              file=sys.stderr,
+          )
+
+      if unexpectedly_loaded:
+          print(
+              "Extensions unexpectedly loaded by default: " + ", ".join(unexpectedly_loaded),
+              file=sys.stderr,
+          )
+
+      if missing_available or unexpectedly_active or unexpectedly_loaded:
+          raise SystemExit(1)
+      PY
+    expect:
+      code: 0

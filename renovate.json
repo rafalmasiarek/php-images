@@ -62,7 +62,8 @@
             "matchManagers": [
                 "github-actions"
             ],
-            "groupName": "ci tooling"
+            "groupName": "ci tooling",
+            "commitBody": "[no ci]"
         },
         {
             "description": "Group web dependencies",

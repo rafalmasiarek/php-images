@@ -6,8 +6,8 @@
   "badges": {
     "build": "https://github.com/rafalmasiarek/php-images/actions/workflows/build.yml/badge.svg?branch=main",
     "license": "https://img.shields.io/github/license/rafalmasiarek/php-images",
-    "trivy_total": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-total.json&cacheSeconds=300&v=23113214568",
-    "built": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Fbuilt.json&cacheSeconds=300&v=23113214568"
+    "trivy_total": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-total.json&cacheSeconds=300&v=23342007559",
+    "built": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Fbuilt.json&cacheSeconds=300&v=23342007559"
   },
   "images": [
     {
@@ -18,34 +18,34 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.2",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "variants": [
         {
           "name": "cli",
           "tag": "8.2-cli",
           "os": "3.22",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.22",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.2-cli.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.2-cli.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.2-cli.html",
           "report_file": "trivy-8.2-cli.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         },
         {
           "name": "fpm",
           "tag": "8.2-fpm",
           "os": "3.22",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.22",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.2-fpm.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.2-fpm.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.2-fpm.html",
           "report_file": "trivy-8.2-fpm.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         }
       ]
     },
@@ -57,34 +57,34 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.3",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "variants": [
         {
           "name": "cli",
           "tag": "8.3-cli",
           "os": "3.22",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.22",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.3-cli.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.3-cli.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.3-cli.html",
           "report_file": "trivy-8.3-cli.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         },
         {
           "name": "fpm",
           "tag": "8.3-fpm",
           "os": "3.22",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.22&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.22",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.3-fpm.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.3-fpm.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.3-fpm.html",
           "report_file": "trivy-8.3-fpm.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         }
       ]
     },
@@ -96,34 +96,34 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.4",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "variants": [
         {
           "name": "cli",
           "tag": "8.4-cli",
           "os": "3.23",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.23",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.4-cli.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.4-cli.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.4-cli.html",
           "report_file": "trivy-8.4-cli.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         },
         {
           "name": "fpm",
           "tag": "8.4-fpm",
           "os": "3.23",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.23",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.4-fpm.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.4-fpm.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.4-fpm.html",
           "report_file": "trivy-8.4-fpm.html",
-          "critical": 0,
+          "critical": 1,
           "high": 0,
-          "medium": 0
+          "medium": 2
         }
       ]
     },
@@ -135,16 +135,16 @@
       "is_maintained": true,
       "is_eol": false,
       "release_url": "https://github.com/rafalmasiarek/php-images/releases/tag/php-8.5",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "variants": [
         {
           "name": "cli",
           "tag": "8.5-cli",
           "os": "3.23",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.23",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.5-cli.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.5-cli.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.5-cli.html",
           "report_file": "trivy-8.5-cli.html",
           "critical": 0,
@@ -155,9 +155,9 @@
           "name": "fpm",
           "tag": "8.5-fpm",
           "os": "3.23",
-          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23113214568",
+          "os_badge_url": "https://img.shields.io/static/v1?label=alpine&message=v3.23&color=blue&cacheSeconds=300&v=23342007559",
           "os_layers_url": "https://hub.docker.com/layers/library/alpine/3.23",
-          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.5-fpm.json&cacheSeconds=300&v=23113214568",
+          "trivy_badge_url": "https://img.shields.io/endpoint?url=https%3A%2F%2Fphp-images.masiarek.dev%2Fbadges%2Ftrivy-8.5-fpm.json&cacheSeconds=300&v=23342007559",
           "report_relative_url": "/reports/trivy-8.5-fpm.html",
           "report_file": "trivy-8.5-fpm.html",
           "critical": 0,
@@ -173,11 +173,11 @@
       "version": "8.2.30",
       "eol": "2026-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.2-cli.html"
     },
     {
@@ -185,11 +185,11 @@
       "version": "8.2.30",
       "eol": "2026-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.2-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.2-fpm.html"
     },
     {
@@ -197,11 +197,11 @@
       "version": "8.3.30",
       "eol": "2027-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.3-cli.html"
     },
     {
@@ -209,11 +209,11 @@
       "version": "8.3.30",
       "eol": "2027-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.3-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.3-fpm.html"
     },
     {
@@ -221,11 +221,11 @@
       "version": "8.4.19",
       "eol": "2028-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.4-cli.html"
     },
     {
@@ -233,11 +233,11 @@
       "version": "8.4.19",
       "eol": "2028-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-15",
-      "last_sha": "2132bb6",
-      "critical": 0,
+      "last_build": "ghcr.io/rafalmasiarek/php:8.4-cli-2026-03-20",
+      "last_sha": "58fb7d1",
+      "critical": 1,
       "high": 0,
-      "medium": 0,
+      "medium": 2,
       "report_relative_url": "/reports/trivy-8.4-fpm.html"
     },
     {
@@ -245,8 +245,8 @@
       "version": "8.5.4",
       "eol": "2029-12-31",
       "variant": "cli",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "critical": 0,
       "high": 0,
       "medium": 0,
@@ -257,8 +257,8 @@
       "version": "8.5.4",
       "eol": "2029-12-31",
       "variant": "fpm",
-      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-15",
-      "last_sha": "2132bb6",
+      "last_build": "ghcr.io/rafalmasiarek/php:8.5-cli-2026-03-20",
+      "last_sha": "58fb7d1",
       "critical": 0,
       "high": 0,
       "medium": 0,

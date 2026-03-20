@@ -8,14 +8,6 @@ on:
       - "rootfs/**"
       - "hotfixes/**"
       - "scripts/compute-tags.sh"
-      - "scripts/fetch-php-eol.py"
-      - "scripts/gen-readme.py"
-      - "scripts/gen-web-catalog.py"
-      - "web/_config.yml"
-      - "web/index.md"
-      - "web/reports/index.md"
-      - "web/Gemfile"
-      - "web/Gemfile.lock"
       - ".github/workflows/build.yml"
   schedule:
     - cron: "17 3 * * *"
@@ -30,9 +22,9 @@ on:
       deploy_target:
         description: "Where to deploy the generated site"
         required: false
-        default: "pages"
+        default: "default"
         type: choice
-        options: [pages, rsync]
+        options: [default, pages, rsync]
       custom_namespace:
         description: "Custom namespace override (e.g. registry.example.com/team)"
         required: false
@@ -42,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-php-images-${{ github.ref }}
+  group: build-php-images-sanity-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -68,6 +60,8 @@ jobs:
         shell: bash
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import json
@@ -77,92 +71,121 @@ jobs:
 
           root = Path("versions")
           if not root.exists():
-            raise SystemExit("versions/ directory not found")
+              raise SystemExit("versions/ directory not found")
 
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           before = os.environ.get("GITHUB_EVENT_BEFORE", "")
           sha = os.environ.get("GITHUB_SHA", "")
 
           def all_php_versions() -> list[str]:
-            return sorted([p.name for p in root.iterdir() if p.is_dir()])
+              return sorted(p.name for p in root.iterdir() if p.is_dir())
 
-          def dockerfiles_for_php(php: str) -> list[Path]:
-            return sorted((root / php).glob("*/Dockerfile")) if (root / php).exists() else []
+          def variants_for_php(php: str) -> list[str]:
+              php_dir = root / php
+              if not php_dir.exists():
+                  return []
+              return sorted(
+                  p.name
+                  for p in php_dir.iterdir()
+                  if p.is_dir() and (p / "Dockerfile").exists()
+              )
+
+          def dockerfile_for(php: str, variant: str) -> Path | None:
+              path = root / php / variant / "Dockerfile"
+              return path if path.exists() else None
+
+          def all_variant_pairs() -> list[tuple[str, str]]:
+              pairs: list[tuple[str, str]] = []
+              for php in all_php_versions():
+                  for variant in variants_for_php(php):
+                      pairs.append((php, variant))
+              return sorted(pairs)
 
           changed: list[str] | None = None
+
           if event in ("schedule", "workflow_dispatch"):
-            changed = None
+              changed = None
           elif event == "push" and before and before != "0000000000000000000000000000000000000000":
-            out = subprocess.check_output(["git", "diff", "--name-only", f"{before}..{sha}"], text=True)
-            changed = [p.strip() for p in out.splitlines() if p.strip()]
+              out = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{before}..{sha}"],
+                  text=True,
+              )
+              changed = [p.strip() for p in out.splitlines() if p.strip()]
           else:
-            changed = None
+              changed = None
 
           full_build = False
-          touched_phps: set[str] = set()
+          touched_pairs: set[tuple[str, str]] = set()
 
           if changed is None:
-            full_build = True
+              full_build = True
           else:
-            for path in changed:
-              if path.startswith("versions/"):
-                parts = path.split("/")
-                if len(parts) >= 2 and parts[1]:
-                  touched_phps.add(parts[1])
-                  continue
+              for path in changed:
+                  if path in {
+                      ".github/workflows/build.yml",
+                      "scripts/compute-tags.sh",
+                  }:
+                      full_build = True
+                      continue
 
-              if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
-                full_build = True
-                continue
+                  if path.startswith("rootfs/"):
+                      full_build = True
+                      continue
 
-              if path.startswith("hotfixes/php/"):
-                parts = path.split("/")
-                if len(parts) >= 3 and parts[2]:
-                  touched_phps.add(parts[2])
-                  continue
+                  if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
+                      full_build = True
+                      continue
 
-              if path.startswith("rootfs/"):
-                full_build = True
-                continue
+                  if path.startswith("versions/"):
+                      parts = path.split("/")
+                      if len(parts) >= 3 and parts[1] and parts[2]:
+                          php = parts[1]
+                          variant = parts[2]
+                          if dockerfile_for(php, variant):
+                              touched_pairs.add((php, variant))
+                      continue
 
-              if path in {
-                ".github/workflows/build.yml",
-                "scripts/compute-tags.sh",
-              }:
-                full_build = True
-                continue
+                  if path.startswith("hotfixes/php/"):
+                      parts = path.split("/")
+                      if len(parts) >= 5 and parts[2] and parts[3]:
+                          php = parts[2]
+                          target = parts[3]
 
-          include = []
-          phps_to_build: list[str]
+                          if target == "all":
+                              for variant in variants_for_php(php):
+                                  touched_pairs.add((php, variant))
+                          else:
+                              variant = target
+                              if dockerfile_for(php, variant):
+                                  touched_pairs.add((php, variant))
+                      continue
 
           if full_build:
-            phps_to_build = all_php_versions()
-            dockerfiles = sorted(root.glob("*/*/Dockerfile"))
+              pairs_to_build = all_variant_pairs()
           else:
-            phps_to_build = sorted(touched_phps)
-            dockerfiles = []
-            for php in phps_to_build:
-              dockerfiles.extend(dockerfiles_for_php(php))
-            dockerfiles = sorted(set(dockerfiles))
+              pairs_to_build = sorted(touched_pairs)
 
-          for dockerfile in dockerfiles:
-            php = dockerfile.parts[1]
-            variant = dockerfile.parts[2]
-            include.append({
-              "php": php,
-              "variant": variant,
-              "context": f"versions/{php}/{variant}",
-              "dockerfile": f"versions/{php}/{variant}/Dockerfile",
-            })
+          include = []
+          phps_to_build = sorted({php for php, _ in pairs_to_build})
+
+          for php, variant in pairs_to_build:
+              include.append(
+                  {
+                      "php": php,
+                      "variant": variant,
+                      "context": f"versions/{php}/{variant}",
+                      "dockerfile": f"versions/{php}/{variant}/Dockerfile",
+                  }
+              )
 
           matrix = {"include": include}
 
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as fh:
-            fh.write("matrix=" + json.dumps(matrix) + "\n")
-            fh.write("count=" + str(len(include)) + "\n")
-            fh.write("phps=" + json.dumps(phps_to_build) + "\n")
-            fh.write("full=" + ("true" if full_build else "false") + "\n")
+              fh.write("matrix=" + json.dumps(matrix) + "\n")
+              fh.write("count=" + str(len(include)) + "\n")
+              fh.write("phps=" + json.dumps(phps_to_build) + "\n")
+              fh.write("full=" + ("true" if full_build else "false") + "\n")
           PY
 
   build:
@@ -211,6 +234,13 @@ jobs:
             echo "namespace=ghcr.io/${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Define cache refs
+        id: cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ref=${{ steps.ns.outputs.namespace }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.php }}-${{ matrix.variant }}" >> "$GITHUB_OUTPUT"
+
       - name: Login to custom registry
         if: steps.ns.outputs.target == 'custom'
         shell: bash
@@ -230,6 +260,44 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
+
+      - name: Cache Trivy data
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/trivy
+          key: trivy-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install Trivy CLI
+        uses: aquasecurity/setup-trivy@v0.2.6
+
+      - name: Cache sanityctl
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/sanityctl
+          key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
+
+      - name: Install sanityctl
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64|amd64) asset="sanityctl-linux-amd64" ;;
+            aarch64|arm64) asset="sanityctl-linux-arm64" ;;
+            *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+          esac
+          cache_dir="${HOME}/.cache/sanityctl"
+          mkdir -p "$cache_dir"
+          base="https://github.com/rafalmasiarek/py-sanityctl/releases/download/latest"
+          if [ ! -f "${cache_dir}/${asset}" ]; then
+            curl -fsSL -o "${cache_dir}/${asset}" "$base/$asset"
+          fi
+          if [ ! -f "${cache_dir}/SHA256SUMS.txt" ]; then
+            curl -fsSL -o "${cache_dir}/SHA256SUMS.txt" "$base/SHA256SUMS.txt"
+          fi
+          grep " $asset\$" "${cache_dir}/SHA256SUMS.txt" | sed "s#  $asset#  ${cache_dir}/${asset}#" | sha256sum -c -
+          sudo install -m 0755 "${cache_dir}/${asset}" /usr/local/bin/sanityctl
+          sanityctl --help &> /dev/null
 
       - name: Compute tags
         id: tags
@@ -265,10 +333,10 @@ jobs:
           eol = ""
 
           if src.exists():
-            obj = json.loads(src.read_text(encoding="utf-8"))
-            info = obj.get(php, {})
-            version = str(info.get("version") or php)
-            eol = str(info.get("eol") or "")
+              obj = json.loads(src.read_text(encoding="utf-8"))
+              info = obj.get(php, {})
+              version = str(info.get("version") or php)
+              eol = str(info.get("eol") or "")
 
           built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -278,7 +346,6 @@ jobs:
                       f"PHP_BRANCH={php}",
                       f"PHP_VERSION={version}",
                       f"PHP_EOL={eol}",
-                      f"IMAGE_BUILT_AT={built_at}",
                       "",
                   ]
               ),
@@ -338,6 +405,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           load: true
           push: false
+          pull: true
           platforms: linux/amd64
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
@@ -346,137 +414,70 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: false
           sbom: false
-          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-from: |
+            type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
 
-      - name: Run phpctl smoke tests on candidate image
-        id: phpctl_smoke
+      - name: Collect data for sanity checks
         shell: bash
+        env:
+          IMAGE_TAG: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
         run: |
           set -euo pipefail
 
-          img="local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate"
-          log="/tmp/phpctl-smoke-${{ matrix.php }}-${{ matrix.variant }}.txt"
+          rm -rf .sanity-cache
+          mkdir -p .sanity-cache
+
+          docker run --rm \
+            -v "$PWD/.sanity-cache:/out" \
+            "$IMAGE_TAG" \
+            sh -lc '
+              set -euo pipefail
+
+              phpctl version > /out/phpctl-version.txt
+              phpctl --output json info > /out/phpctl-info.json
+              phpctl --output json ext versions > /out/phpctl-ext-versions.json
+              phpctl --output json ext list > /out/phpctl-ext-list.json
+              php -v > /out/php-v.txt
+              php -m > /out/php-m.txt
+              cat /etc/alpine-release > /out/alpine-release.txt
+            '
+
+      - name: Run sanityctl checks
+        id: phpctl_check
+        shell: bash
+        env:
+          IMAGE_TAG: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
+          PHP_MM: ${{ matrix.php }}
+          PECL_FILE: versions/${{ matrix.php }}/${{ matrix.variant }}/pecl.txt
+        run: |
+          set -euo pipefail
+
+          log="/tmp/phpctl-check-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
           {
-            echo "### phpctl smoke tests for $img"
+            echo "<!-- php-report:${{ matrix.php }}:${{ matrix.variant }} -->"
+            echo "### sanityctl validation for ${IMAGE_TAG}"
             echo
-
-            echo "== phpctl version =="
-            docker run --rm "$img" sh -lc 'phpctl version'
-
-            echo
-            echo "== phpctl help =="
-            docker run --rm "$img" sh -lc 'phpctl help | sed -n "1,25p"'
-
-            echo
-            echo "== phpctl json version =="
-            docker run --rm "$img" sh -lc 'phpctl --output json version'
-
-            echo
-            echo "== phpctl json info =="
-            docker run --rm "$img" sh -lc 'phpctl --output json info'
-
-            echo
-            echo "== phpctl json paths =="
-            docker run --rm "$img" sh -lc 'phpctl --output json paths'
-
-            echo
-            echo "== phpctl json doctor =="
-            docker run --rm "$img" sh -lc 'phpctl --output json doctor'
-
-            echo
-            echo "== phpctl json self-test =="
-            docker run --rm "$img" sh -lc 'phpctl --output json self-test'
-
-            echo
-            echo "== phpctl json ini show =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini show'
-
-            echo
-            echo "== phpctl json ini get memory_limit =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ini get memory_limit'
-
-            echo
-            echo "== phpctl json ext list =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext list'
-
-            echo
-            echo "== phpctl json ext versions =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext versions'
-
-            echo
-            echo "== phpctl json ext so-list =="
-            docker run --rm "$img" sh -lc 'phpctl --output json ext so-list'
-
-            echo
-            echo "== phpctl ext detect gd =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect gd'
-
-            echo
-            echo "== phpctl ext detect redis =="
-            docker run --rm "$img" sh -lc 'phpctl ext detect redis || true'
-
-            if [ "${{ matrix.variant }}" = "fpm" ]; then
-              echo
-              echo "== phpctl fpm status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm status'
-
-              echo
-              echo "== phpctl fpm test =="
-              docker run --rm "$img" sh -lc 'phpctl --output json fpm test || true'
-
-              echo
-              echo "== phpctl fpm pool render =="
-              docker run --rm "$img" sh -lc 'phpctl fpm pool render smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke'
-
-              echo
-              echo "== phpctl fpm pool create/show/enable/disable/delete =="
-              docker run --rm "$img" sh -lc '
-                set -eu
-                phpctl fpm pool create smoke -p ENABLE_METRICS=true -p STATUS_PATH=/fpm-status-smoke
-                phpctl --output json fpm pool show smoke
-                phpctl --output json fpm pool enable smoke
-                phpctl --output json fpm pool disable smoke
-                phpctl --output json fpm pool delete smoke
-              '
-            else
-              echo
-              echo "== phpctl status =="
-              docker run --rm "$img" sh -lc 'phpctl --output json status || true'
-
-              echo
-              echo "== phpctl health =="
-              docker run --rm "$img" sh -lc 'phpctl --output json health || true'
-
-              echo
-              echo "== phpctl metrics =="
-              docker run --rm "$img" sh -lc 'phpctl metrics | sed -n "1,30p" || true'
-            fi
+            sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
           } | tee "$log"
 
           echo "log=$log" >> "$GITHUB_OUTPUT"
 
-      - name: Add phpctl smoke summary
+      - name: Trivy scan candidate (JSON)
         shell: bash
         run: |
           set -euo pipefail
-          {
-            echo "### phpctl smoke tests"
-            echo "- PHP: \`${{ matrix.php }}\`"
-            echo "- Variant: \`${{ matrix.variant }}\`"
-            echo "- Candidate image: \`local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate\`"
-            echo "- Result: \`passed\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Trivy scan candidate (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate
-          format: json
-          output: trivy-results-pre.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results-pre.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "local/${{ env.IMAGE_NAME }}:${{ matrix.php }}-${{ matrix.variant }}-candidate"
 
       - name: Detect Alpine versions
         id: alpine
@@ -655,6 +656,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: |
@@ -665,8 +667,12 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: false
           sbom: false
-          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-from: |
+            type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
 
       - name: Push final image with hotfixes
         if: steps.hotfixes.outputs.enabled == 'true'
@@ -677,6 +683,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
+          pull: true
           build-args: |
             PECL_FILE=${{ matrix.context }}/pecl.txt
           tags: |
@@ -687,8 +694,12 @@ jobs:
           annotations: ${{ steps.meta.outputs.annotations }}
           provenance: false
           sbom: false
-          cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+          cache-from: |
+            type=gha,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }}
+          cache-to: |
+            type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.variant }}
+            type=registry,ref=${{ steps.cache.outputs.ref }},mode=max
 
       - name: Resolve final digest
         id: finalimg
@@ -708,41 +719,35 @@ jobs:
 
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Verify pushed image with phpctl sanity check
+      - name: Trivy scan final image (JSON)
         shell: bash
         run: |
           set -euo pipefail
+          trivy image \
+            --cache-dir ~/.cache/trivy \
+            --format json \
+            --output trivy-results.json \
+            --vuln-type os,library \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --ignore-unfixed \
+            "${{ steps.tags.outputs.TAG_SHA }}"
 
-          img="${{ steps.tags.outputs.TAG_SHA }}"
+      - name: Convert final Trivy JSON to SARIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy convert --format sarif --output trivy-results.sarif trivy-results.json
 
-          docker run --rm "$img" sh -lc 'phpctl version'
-          docker run --rm "$img" sh -lc 'phpctl --output json info'
-          docker run --rm "$img" sh -lc 'phpctl --output json ext list'
-
-      - name: Trivy scan final image (SARIF)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
-          format: sarif
-          output: trivy-results.sarif
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
+      - name: Convert final Trivy JSON to HTML
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy convert --format template --template "@.github/trivy/html-raport.tpl" --output trivy-report.html trivy-results.json
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
-
-      - name: Trivy scan final image (JSON)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
-          format: json
-          output: trivy-results.json
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
 
       - name: Analyze remediation result
         id: remediation
@@ -829,6 +834,38 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Append security summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          pre_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results-pre.json)"
+          pre_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results-pre.json)"
+          pre_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results-pre.json)"
+
+          post_critical="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)"
+          post_high="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)"
+          post_medium="$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results.json)"
+
+          {
+            echo "### Security summary"
+            echo
+            echo "| Stage | Critical | High | Medium |"
+            echo "|---|---:|---:|---:|"
+            echo "| Before hotfixes | ${pre_critical} | ${pre_high} | ${pre_medium} |"
+            echo "| After hotfixes | ${post_critical} | ${post_high} | ${post_medium} |"
+            echo
+            echo "### Hotfix matching"
+            echo
+            echo "- Hotfix scripts selected: \`${{ steps.hotfixes.outputs.selected_count }}\`"
+            echo "- Matching hotfix CVEs found: \`${{ steps.hotfixes.outputs.matched_cves || 'none' }}\`"
+            echo "- Unmatched CVEs: \`${{ steps.hotfixes.outputs.unmatched_cves || 'none' }}\`"
+            echo "- Hotfix rebuild performed: \`${{ steps.hotfixes.outputs.enabled }}\`"
+            echo "- Fixed CVEs after rebuild: \`${{ steps.remediation.outputs.fixed_count }}\`"
+            echo "- Remaining CVEs after rebuild: \`${{ steps.remediation.outputs.remaining_count }}\`"
+            echo "- New CVEs after rebuild: \`${{ steps.remediation.outputs.new_count }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Print hotfix status
         shell: bash
         run: |
@@ -839,23 +876,6 @@ jobs:
           echo "Fixed CVEs: ${{ steps.remediation.outputs.fixed_cves }}"
           echo "Remaining CVEs: ${{ steps.remediation.outputs.remaining_cves }}"
           echo "New CVEs: ${{ steps.remediation.outputs.new_cves }}"
-
-      - name: Fetch Trivy HTML template
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -o trivy-html.tpl
-
-      - name: Trivy scan final image (HTML report)
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: ${{ steps.tags.outputs.TAG_SHA }}
-          format: template
-          template: "@trivy-html.tpl"
-          output: trivy-report.html
-          vuln-type: os,library
-          severity: CRITICAL,HIGH,MEDIUM
-          ignore-unfixed: true
 
       - name: Write image and scan artifacts
         shell: bash
@@ -915,6 +935,8 @@ jobs:
           medium=${MED}
           EOF
 
+          export CRIT HIGH MED OS
+
           python3 - <<'PY'
           import json
           import os
@@ -938,6 +960,10 @@ jobs:
           new_cves = csv_list(os.environ.get("NEW_CVES", ""))
           alpine_full = os.environ.get("ALPINE_IMAGE_FULL") or os.environ.get("ALPINE_DOCKERFILE_FULL") or "unknown"
           alpine_minor = os.environ.get("ALPINE_IMAGE_MINOR") or os.environ.get("ALPINE_DOCKERFILE_MINOR") or "unknown"
+          os_version = os.environ.get("OS", "unknown")
+          critical = int(os.environ.get("CRIT") or "0")
+          high = int(os.environ.get("HIGH") or "0")
+          medium = int(os.environ.get("MED") or "0")
 
           selected_scripts_path = Path(".hotfixes-selected-files.txt")
           selected_scripts = []
@@ -965,6 +991,25 @@ jobs:
 
           Path(f"out/hotfix-meta-{php}-{variant}.json").write_text(
               json.dumps(hotfix_meta, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
+          state = {
+              "php": php,
+              "variant": variant,
+              "os": os_version,
+              "image_sha": image_sha,
+              "image_date": image_date,
+              "image_moving": image_moving,
+              "digest": digest,
+              "critical": critical,
+              "high": high,
+              "medium": medium,
+              "report_file": f"trivy-{php}-{variant}.html",
+          }
+
+          Path(f"out/state-{php}-{variant}.json").write_text(
+              json.dumps(state, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
 
@@ -1011,42 +1056,57 @@ jobs:
           )
           PY
 
-          cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
+          if [ -f trivy-report.html ]; then
+            cp trivy-report.html "out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html"
+          fi
 
       - uses: actions/upload-artifact@v7
+        if: steps.phpctl_check.outputs.log != '' && hashFiles(steps.phpctl_check.outputs.log) != ''
         with:
-          name: phpctl-smoke-${{ matrix.php }}-${{ matrix.variant }}
-          path: ${{ steps.phpctl_smoke.outputs.log }}
+          name: phpctl-check-${{ matrix.php }}-${{ matrix.variant }}
+          path: ${{ steps.phpctl_check.outputs.log }}
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/image-meta-{0}-{1}.txt', matrix.php, matrix.variant)) != ''
         with:
           name: image-meta-${{ matrix.php }}-${{ matrix.variant }}
           path: out/image-meta-${{ matrix.php }}-${{ matrix.variant }}.txt
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/trivy-summary-{0}-{1}.txt', matrix.php, matrix.variant)) != ''
         with:
           name: trivy-summary-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-summary-${{ matrix.php }}-${{ matrix.variant }}.txt
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/trivy-{0}-{1}.html', matrix.php, matrix.variant)) != ''
         with:
           name: trivy-report-${{ matrix.php }}-${{ matrix.variant }}
           path: out/trivy-${{ matrix.php }}-${{ matrix.variant }}.html
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/hotfix-meta-{0}-{1}.json', matrix.php, matrix.variant)) != ''
         with:
           name: hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}
           path: out/hotfix-meta-${{ matrix.php }}-${{ matrix.variant }}.json
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/vulns-{0}-{1}.json', matrix.php, matrix.variant)) != ''
         with:
           name: vulns-${{ matrix.php }}-${{ matrix.variant }}
           path: out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/state-{0}-{1}.json', matrix.php, matrix.variant)) != ''
+        with:
+          name: state-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/state-${{ matrix.php }}-${{ matrix.variant }}.json
           if-no-files-found: error
 
   sync-security-issues:
@@ -1612,6 +1672,14 @@ jobs:
           path: artifacts/trivy-html
           merge-multiple: true
 
+      - name: Download state artifacts
+        if: needs.discover.outputs.count != '0'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: state-*
+          path: artifacts/state
+          merge-multiple: true
+
       - name: Fetch PHP lifecycle data for releases
         if: needs.discover.outputs.count != '0'
         shell: bash
@@ -1619,8 +1687,23 @@ jobs:
           set -euo pipefail
           python3 scripts/fetch-php-eol.py
 
+      - name: Merge current build state into repository state
+        if: needs.discover.outputs.count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p web/_data/state/images
+
+          for f in artifacts/state/*.json; do
+            [ -e "$f" ] || continue
+            php="$(jq -r '.php' "$f")"
+            variant="$(jq -r '.variant' "$f")"
+            cp "$f" "web/_data/state/images/${php}-${variant}.json"
+          done
+
       - name: Create or update releases
-        if: needs.discover.outputs.count != '0' && (github.event.inputs.publish_target == '' || github.event.inputs.publish_target == 'ghcr')
+        if: needs.discover.outputs.count != '0' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish_target == 'ghcr')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -1639,35 +1722,21 @@ jobs:
             exit 0
           fi
 
-          find_image_meta() {
+          find_state() {
             local php="$1" variant="$2"
-            local file
-            for file in artifacts/image-meta/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
-                echo "$file"
-                return 0
-              fi
-            done
-            return 1
+            local file="web/_data/state/images/${php}-${variant}.json"
+            [ -f "$file" ] || return 1
+            echo "$file"
           }
 
-          find_trivy_sum() {
-            local php="$1" variant="$2"
-            local file
-            for file in artifacts/trivy/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
-                echo "$file"
-                return 0
-              fi
-            done
-            return 1
+          state_field() {
+            local file="$1" field="$2"
+            jq -r --arg field "$field" '.[$field] // empty' "$file"
           }
 
           php_lifecycle_field() {
             local php="$1" field="$2"
-            python3 - <<'PY' "$php" "$field"
+            python3 - "$php" "$field" <<'PY'
           import json
           import sys
           from pathlib import Path
@@ -1688,7 +1757,7 @@ jobs:
           }
 
           urlencode() {
-            python3 - <<'PY' "$1"
+            python3 - "$1" <<'PY'
           import sys
           from urllib.parse import quote
           print(quote(sys.argv[1], safe=""))
@@ -1740,16 +1809,8 @@ jobs:
             fi
 
             for V in "${VARIANTS[@]}"; do
-              if ! find_image_meta "$PHP" "$V" >/dev/null; then
-                echo "Missing image metadata for ${PHP}/${V}." >&2
-                exit 1
-              fi
-              if ! find_trivy_sum "$PHP" "$V" >/dev/null; then
-                echo "Missing Trivy summary for ${PHP}/${V}." >&2
-                exit 1
-              fi
-              if [ ! -f "artifacts/trivy-html/trivy-${PHP}-${V}.html" ]; then
-                echo "Missing Trivy HTML report for ${PHP}/${V}." >&2
+              if ! find_state "$PHP" "$V" >/dev/null; then
+                echo "Missing state for ${PHP}/${V}." >&2
                 exit 1
               fi
             done
@@ -1768,13 +1829,13 @@ jobs:
             TRIVY_TOTAL_BADGE="$(shields_endpoint "${SITE_BASE_URL}/badges/trivy-total.json")"
 
             OS_VER=""
-            if find_image_meta "$PHP" "cli" >/dev/null 2>&1; then
-              META_OS_FILE="$(find_image_meta "$PHP" "cli")"
-              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+            if find_state "$PHP" "cli" >/dev/null 2>&1; then
+              META_OS_FILE="$(find_state "$PHP" "cli")"
+              OS_VER="$(state_field "$META_OS_FILE" os)"
             fi
             if [ -z "$OS_VER" ]; then
-              META_OS_FILE="$(find_image_meta "$PHP" "${VARIANTS[0]}")"
-              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+              META_OS_FILE="$(find_state "$PHP" "${VARIANTS[0]}")"
+              OS_VER="$(state_field "$META_OS_FILE" os)"
             fi
             ALPINE_BADGE_MD="$(alpine_badge_md "$OS_VER")"
 
@@ -1799,11 +1860,11 @@ jobs:
               echo "| Variant | Moving | Date | SHA | Digest |"
               echo "|---|---|---|---|---|"
               for V in "${VARIANTS[@]}"; do
-                FILE="$(find_image_meta "$PHP" "$V")"
-                SHA=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
-                DATE=$(grep '^image_date=' "$FILE" | cut -d= -f2)
-                MOV=$(grep '^image_moving=' "$FILE" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
+                FILE="$(find_state "$PHP" "$V")"
+                SHA="$(state_field "$FILE" image_sha)"
+                DATE="$(state_field "$FILE" image_date)"
+                MOV="$(state_field "$FILE" image_moving)"
+                DIG="$(state_field "$FILE" digest)"
                 echo "| \`${V}\` | \`${MOV}\` | \`${DATE}\` | \`${SHA}\` | \`${DIG}\` |"
               done
 
@@ -1813,12 +1874,12 @@ jobs:
               echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM | Report |"
               echo "|---|---|---:|---:|---:|---|"
               for V in "${VARIANTS[@]}"; do
-                FILE="$(find_trivy_sum "$PHP" "$V")"
-                IMG=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
-                C=$(grep '^critical=' "$FILE" | cut -d= -f2)
-                H=$(grep '^high=' "$FILE" | cut -d= -f2)
-                M=$(grep '^medium=' "$FILE" | cut -d= -f2)
+                FILE="$(find_state "$PHP" "$V")"
+                IMG="$(state_field "$FILE" image_sha)"
+                DIG="$(state_field "$FILE" digest)"
+                C="$(state_field "$FILE" critical)"
+                H="$(state_field "$FILE" high)"
+                M="$(state_field "$FILE" medium)"
                 R="${SITE_BASE_URL}/reports/trivy-${PHP}-${V}.html"
                 echo "| \`${V}\` | \`${IMG}@${DIG}\` | $C | $H | $M | ${R} |"
               done
@@ -1841,27 +1902,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p web/badges web/reports
+          mkdir -p web/badges web/reports web/_data/state/images
+
+          for report in artifacts/trivy-html/*.html; do
+            [ -e "$report" ] || continue
+            cp "$report" "web/reports/$(basename "$report")"
+          done
 
           for PHP_DIR in versions/*; do
             [ -d "$PHP_DIR" ] || continue
             PHP="$(basename "$PHP_DIR")"
 
             META_FILE=""
-            for file in artifacts/image-meta/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${PHP}$" "$file" && grep -q "^variant=cli$" "$file"; then
+            if [ -f "web/_data/state/images/${PHP}-cli.json" ]; then
+              META_FILE="web/_data/state/images/${PHP}-cli.json"
+            else
+              for file in web/_data/state/images/${PHP}-*.json; do
+                [ -e "$file" ] || continue
                 META_FILE="$file"
                 break
-              fi
-            done
-            if [ -z "$META_FILE" ]; then
-              for file in artifacts/image-meta/*.txt; do
-                [ -e "$file" ] || continue
-                if grep -q "^php=${PHP}$" "$file"; then
-                  META_FILE="$file"
-                  break
-                fi
               done
             fi
 
@@ -1869,34 +1928,28 @@ jobs:
               continue
             fi
 
-            DATE="$(grep '^image_date=' "$META_FILE" | cut -d= -f2 || true)"
-            SHA_TAG="$(grep '^image_sha=' "$META_FILE" | cut -d= -f2 || true)"
+            DATE="$(jq -r '.image_date // "unknown"' "$META_FILE")"
+            SHA_TAG="$(jq -r '.image_sha // ""' "$META_FILE")"
             SHA7="$(printf '%s' "$SHA_TAG" | sed -n 's/.*-sha-\([0-9a-f]\{7\}\).*/\1/p')"
 
             [ -z "$DATE" ] && DATE="unknown"
             [ -z "$SHA7" ] && SHA7="unknown"
 
-            cat > "web/badges/last-${PHP}.json" <<EOF
-          {"php":"${PHP}","date":"${DATE}","sha":"${SHA7}"}
-          EOF
+            printf '%s\n' "{\"php\":\"${PHP}\",\"date\":\"${DATE}\",\"sha\":\"${SHA7}\"}" > "web/badges/last-${PHP}.json"
           done
 
           TOTAL_C=0
           TOTAL_H=0
           TOTAL_M=0
 
-          for file in artifacts/trivy/*.txt; do
+          for file in web/_data/state/images/*.json; do
             [ -e "$file" ] || continue
 
-            PHP=$(grep '^php=' "$file" | cut -d= -f2)
-            VAR=$(grep '^variant=' "$file" | cut -d= -f2)
-            C=$(grep '^critical=' "$file" | cut -d= -f2)
-            H=$(grep '^high=' "$file" | cut -d= -f2)
-            M=$(grep '^medium=' "$file" | cut -d= -f2)
-
-            C=${C:-0}
-            H=${H:-0}
-            M=${M:-0}
+            PHP="$(jq -r '.php' "$file")"
+            VAR="$(jq -r '.variant' "$file")"
+            C="$(jq -r '.critical // 0' "$file")"
+            H="$(jq -r '.high // 0' "$file")"
+            M="$(jq -r '.medium // 0' "$file")"
 
             TOTAL_C=$((TOTAL_C + C))
             TOTAL_H=$((TOTAL_H + H))
@@ -1911,17 +1964,8 @@ jobs:
               COLOR="yellow"
             fi
 
-            cat > "web/badges/trivy-${PHP}-${VAR}.json" <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
-          EOF
-
-            cat > "web/badges/trivy-${PHP}-${VAR}.data.json" <<EOF
-          {"php":"${PHP}","variant":"${VAR}","critical":${C},"high":${H},"medium":${M}}
-          EOF
-
-            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
-              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
-            fi
+            printf '%s\n' "{\"schemaVersion\":1,\"label\":\"trivy\",\"message\":\"C:${C} H:${H} M:${M}\",\"color\":\"${COLOR}\"}" > "web/badges/trivy-${PHP}-${VAR}.json"
+            printf '%s\n' "{\"php\":\"${PHP}\",\"variant\":\"${VAR}\",\"critical\":${C},\"high\":${H},\"medium\":${M}}" > "web/badges/trivy-${PHP}-${VAR}.data.json"
           done
 
           TOTAL_COLOR="brightgreen"
@@ -1933,35 +1977,18 @@ jobs:
             TOTAL_COLOR="yellow"
           fi
 
-          cat > web/badges/trivy-total.json <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}"}
-          EOF
-
-          cat > web/badges/trivy-total.data.json <<EOF
-          {"critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"trivy\",\"message\":\"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}\",\"color\":\"${TOTAL_COLOR}\"}" > web/badges/trivy-total.json
+          printf '%s\n' "{\"critical\":${TOTAL_C},\"high\":${TOTAL_H},\"medium\":${TOTAL_M}}" > web/badges/trivy-total.data.json
 
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
-          cat > web/badges/php.json <<EOF
-          {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"php\",\"message\":\"${PHP_VERSIONS}\",\"color\":\"blue\"}" > web/badges/php.json
 
           BUILT="$(date -u +%Y-%m-%d_%H:%M_UTC)"
-          cat > web/badges/built.json <<EOF
-          {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"built\",\"message\":\"${BUILT}\",\"color\":\"blue\"}" > web/badges/built.json
 
-          IMAGES_COUNT=$(find web/badges -maxdepth 1 -type f -name 'trivy-*.json' ! -name 'trivy-total.json' ! -name '*.data.json' | wc -l | tr -d ' ')
-          cat > web/badges/images.json <<EOF
-          {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
-          EOF
-
-      - name: Fetch PHP lifecycle data
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/fetch-php-eol.py
+          IMAGES_COUNT=$(find web/_data/state/images -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"images\",\"message\":\"${IMAGES_COUNT}\",\"color\":\"blue\"}" > web/badges/images.json
 
       - name: Generate README
         shell: bash
@@ -2010,7 +2037,15 @@ jobs:
   pages-build:
     name: build site for GitHub Pages
     needs: update-repo
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name != 'workflow_dispatch' && vars.DEFAULT_DEPLOY_TARGET == 'pages') ||
+        (github.event_name == 'workflow_dispatch' && (
+          github.event.inputs.deploy_target == 'pages' ||
+          (github.event.inputs.deploy_target == 'default' && vars.DEFAULT_DEPLOY_TARGET == 'pages')
+        ))
+      )
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -2065,7 +2100,15 @@ jobs:
   deploy-pages:
     name: deploy GitHub Pages
     needs: pages-build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event.inputs.deploy_target == 'pages')
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name != 'workflow_dispatch' && vars.DEFAULT_DEPLOY_TARGET == 'pages') ||
+        (github.event_name == 'workflow_dispatch' && (
+          github.event.inputs.deploy_target == 'pages' ||
+          (github.event.inputs.deploy_target == 'default' && vars.DEFAULT_DEPLOY_TARGET == 'pages')
+        ))
+      )
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -2081,7 +2124,15 @@ jobs:
   deploy-rsync:
     name: deploy site via rsync
     needs: update-repo
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'rsync'
+    if: >
+      github.ref == 'refs/heads/main' &&
+      (
+        (github.event_name != 'workflow_dispatch' && vars.DEFAULT_DEPLOY_TARGET == 'rsync') ||
+        (github.event_name == 'workflow_dispatch' && (
+          github.event.inputs.deploy_target == 'rsync' ||
+          (github.event.inputs.deploy_target == 'default' && vars.DEFAULT_DEPLOY_TARGET == 'rsync')
+        ))
+      )
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -2140,13 +2191,6 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p "${{ secrets.RSYNC_SSH_PORT || '22' }}" "${{ secrets.RSYNC_SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      # Required repository secrets for rsync deployment:
-      # - RSYNC_SSH_KEY
-      # - RSYNC_SSH_HOST
-      # - RSYNC_SSH_USER
-      # - RSYNC_SSH_PATH
-      # Optional repository secret:
-      # - RSYNC_SSH_PORT
       - name: Rsync to server
         env:
           RSYNC_HOST: ${{ secrets.RSYNC_SSH_HOST }}
