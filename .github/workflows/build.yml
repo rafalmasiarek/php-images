@@ -1984,7 +1984,7 @@ jobs:
   pages-build:
     name: build site for GitHub Pages
     needs: update-repo
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'pages')
+    if: github.ref == 'refs/heads/main' && github.event.inputs.deploy_target == 'pages'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -2039,7 +2039,7 @@ jobs:
   deploy-pages:
     name: deploy GitHub Pages
     needs: pages-build
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'pages')
+    if: github.ref == 'refs/heads/main' && github.event.inputs.deploy_target == 'pages'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -2055,7 +2055,7 @@ jobs:
   deploy-rsync:
     name: deploy site via rsync
     needs: update-repo
-    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_target == 'rsync'
+    if: github.ref == 'refs/heads/main' && github.event.inputs.deploy_target == 'rsync'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
