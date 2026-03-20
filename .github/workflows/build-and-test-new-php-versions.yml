@@ -50,12 +50,18 @@ jobs:
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            export BASE_SHA="${{ github.event.pull_request.base.sha }}"
             export HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            export BASE_REF="${{ github.event.pull_request.base.ref }}"
+
+            git fetch origin "$BASE_REF" --depth=1
+            export BASE_SHA="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")"
           else
             export BASE_SHA="${{ github.event.before }}"
             export HEAD_SHA="${{ github.sha }}"
           fi
+
+          echo "BASE_SHA=$BASE_SHA"
+          echo "HEAD_SHA=$HEAD_SHA"
 
           python3 - <<'PY'
           import json
@@ -123,6 +129,10 @@ jobs:
           )
           changed = [line.strip() for line in out.splitlines() if line.strip()]
 
+          print("Changed files:")
+          for path in changed:
+              print(f" - {path}")
+
           selected = set()
           full_build = False
 
@@ -178,6 +188,10 @@ jobs:
                   continue
 
           dockerfiles = all_dockerfiles() if full_build else sorted(Path(p) for p in selected)
+
+          print("Selected Dockerfiles:")
+          for dockerfile in dockerfiles:
+              print(f" - {dockerfile}")
 
           include = []
           for dockerfile in dockerfiles:
