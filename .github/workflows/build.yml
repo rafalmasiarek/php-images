@@ -1874,9 +1874,7 @@ jobs:
             [ -z "$DATE" ] && DATE="unknown"
             [ -z "$SHA7" ] && SHA7="unknown"
 
-            cat > "web/badges/last-${PHP}.json" <<EOF
-            {"php":"${PHP}","date":"${DATE}","sha":"${SHA7}"}
-            EOF
+            printf '%s\n' "{\"php\":\"${PHP}\",\"date\":\"${DATE}\",\"sha\":\"${SHA7}\"}" > "web/badges/last-${PHP}.json"
           done
 
           TOTAL_C=0
@@ -1909,13 +1907,8 @@ jobs:
               COLOR="yellow"
             fi
 
-            cat > "web/badges/trivy-${PHP}-${VAR}.json" <<EOF
-            {"schemaVersion":1,"label":"trivy","message":"C:${C} H:${H} M:${M}","color":"${COLOR}"}
-            EOF
-
-            cat > "web/badges/trivy-${PHP}-${VAR}.data.json" <<EOF
-            {"php":"${PHP}","variant":"${VAR}","critical":${C},"high":${H},"medium":${M}}
-            EOF
+            printf '%s\n' "{\"schemaVersion\":1,\"label\":\"trivy\",\"message\":\"C:${C} H:${H} M:${M}\",\"color\":\"${COLOR}\"}" > "web/badges/trivy-${PHP}-${VAR}.json"
+            printf '%s\n' "{\"php\":\"${PHP}\",\"variant\":\"${VAR}\",\"critical\":${C},\"high\":${H},\"medium\":${M}}" > "web/badges/trivy-${PHP}-${VAR}.data.json"
 
             if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
               cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
@@ -1931,29 +1924,18 @@ jobs:
             TOTAL_COLOR="yellow"
           fi
 
-          cat > web/badges/trivy-total.json <<EOF
-          {"schemaVersion":1,"label":"trivy","message":"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}","color":"${TOTAL_COLOR}"}
-          EOF
-
-          cat > web/badges/trivy-total.data.json <<EOF
-          {"critical":${TOTAL_C},"high":${TOTAL_H},"medium":${TOTAL_M}}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"trivy\",\"message\":\"C:${TOTAL_C} H:${TOTAL_H} M:${TOTAL_M}\",\"color\":\"${TOTAL_COLOR}\"}" > web/badges/trivy-total.json
+          printf '%s\n' "{\"critical\":${TOTAL_C},\"high\":${TOTAL_H},\"medium\":${TOTAL_M}}" > web/badges/trivy-total.data.json
 
           PHP_VERSIONS=$(ls -1 versions 2>/dev/null | sort -V | paste -sd '|' -)
           [ -z "$PHP_VERSIONS" ] && PHP_VERSIONS="unknown"
-          cat > web/badges/php.json <<EOF
-          {"schemaVersion":1,"label":"php","message":"${PHP_VERSIONS}","color":"blue"}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"php\",\"message\":\"${PHP_VERSIONS}\",\"color\":\"blue\"}" > web/badges/php.json
 
           BUILT="$(date -u +%Y-%m-%d_%H:%M_UTC)"
-          cat > web/badges/built.json <<EOF
-          {"schemaVersion":1,"label":"built","message":"${BUILT}","color":"blue"}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"built\",\"message\":\"${BUILT}\",\"color\":\"blue\"}" > web/badges/built.json
 
           IMAGES_COUNT=$(find web/badges -maxdepth 1 -type f -name 'trivy-*.json' ! -name 'trivy-total.json' ! -name '*.data.json' | wc -l | tr -d ' ')
-          cat > web/badges/images.json <<EOF
-          {"schemaVersion":1,"label":"images","message":"${IMAGES_COUNT}","color":"blue"}
-          EOF
+          printf '%s\n' "{\"schemaVersion\":1,\"label\":\"images\",\"message\":\"${IMAGES_COUNT}\",\"color\":\"blue\"}" > web/badges/images.json
 
       - name: Generate README
         shell: bash
