@@ -1,0 +1,123 @@
+services:
+  worker-a:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    container_name: poc-worker-a
+    restart: unless-stopped
+    environment:
+      PHPCTL_WORKER_ID: worker-a
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_LABEL_LB__ADDRESS: worker-a
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+    expose:
+      - "8080"
+    networks:
+      - phpctl-poc
+
+  worker-b:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    container_name: poc-worker-b
+    restart: unless-stopped
+    environment:
+      PHPCTL_WORKER_ID: worker-b
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_LABEL_LB__ADDRESS: worker-b
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+    expose:
+      - "8080"
+    networks:
+      - phpctl-poc
+
+  worker-c:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    container_name: poc-worker-c
+    restart: unless-stopped
+    environment:
+      PHPCTL_WORKER_ID: worker-c
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_LABEL_LB__ADDRESS: worker-c
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+    expose:
+      - "8080"
+    networks:
+      - phpctl-poc
+
+  loadbalancer:
+    build:
+      context: ..
+      dockerfile: loadbalancer/Dockerfile
+    container_name: poc-loadbalancer
+    restart: unless-stopped
+    volumes:
+      - ./loadbalancer/routes.bootstrap.json:/config/routes.bootstrap.json:ro
+      - loadbalancer-state:/var/lib/php-loadbalancer
+    command:
+      [
+        "python",
+        "-m",
+        "app.main",
+        "--config",
+        "/config/routes.bootstrap.json",
+        "--loop",
+      ]
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    expose:
+      - "8080"
+      - "8081"
+    depends_on:
+      - worker-a
+      - worker-b
+      - worker-c
+    networks:
+      - phpctl-poc
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    container_name: poc-orchestrator
+    restart: unless-stopped
+    volumes:
+      - ./orchestrator/desired-state.json:/config/desired-state.json:ro
+      - ./orchestrator/workers.json:/config/workers.json:ro
+      - orchestrator-state:/var/lib/php-orchestrator
+    command:
+      [
+        "python",
+        "-m",
+        "app.main",
+        "--config",
+        "/config/desired-state.json",
+        "--loop",
+      ]
+    depends_on:
+      - worker-a
+      - worker-b
+      - worker-c
+      - loadbalancer
+    networks:
+      - phpctl-poc
+
+networks:
+  phpctl-poc:
+    name: phpctl-poc
+
+volumes:
+  orchestrator-state:
+  loadbalancer-state:

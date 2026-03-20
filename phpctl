@@ -55,6 +55,16 @@ PHPCTL_SERVE_LISTEN="${PHPCTL_SERVE_LISTEN:-0.0.0.0:8080}"
 PHPCTL_SERVER_LISTEN="${PHPCTL_SERVER_LISTEN:-${PHPCTL_SERVE_LISTEN}}"
 PHPCTL_CLIENT_CONF="${PHPCTL_CLIENT_CONF:-${HOME:-/root}/.phpctl/client.conf}"
 
+PHPCTL_WORKER_ID="${PHPCTL_WORKER_ID:-}"
+PHPCTL_WORKER_GROUP="${PHPCTL_WORKER_GROUP:-}"
+PHPCTL_WORKER_LABELS_JSON="${PHPCTL_WORKER_LABELS_JSON:-}"
+PHPCTL_WORKER_MAX_POOLS="${PHPCTL_WORKER_MAX_POOLS:-0}"
+PHPCTL_WORKER_MAX_CHILDREN_TOTAL="${PHPCTL_WORKER_MAX_CHILDREN_TOTAL:-0}"
+PHPCTL_WORKER_MAX_REPLICAS="${PHPCTL_WORKER_MAX_REPLICAS:-0}"
+PHPCTL_WORKER_MAX_MEMORY_MB="${PHPCTL_WORKER_MAX_MEMORY_MB:-0}"
+
+PHPCTL_POOL_META_PREFIX="${PHPCTL_POOL_META_PREFIX:-phpctl.meta.}"
+
 PHPCTL_REMOTE_MODE=""
 PHPCTL_REMOTE_HOST=""
 PHPCTL_REMOTE_CREDENTIALS=""
@@ -503,7 +513,6 @@ ext_write_ini() {
     printf '%s\n' "${ini_path}"
 }
 
-# Prepare PHP source tree using the official helper.
 php_source_prepare() {
     src_exists=""
     if [ -d "${PHP_SRC_DIR}" ]; then
@@ -518,7 +527,6 @@ php_source_prepare() {
     fi
 }
 
-# Remove PHP sources only if phpctl extracted them for this run.
 php_source_cleanup() {
     if [ -e "${PHP_SRC_DIR}/.docker-delete-me" ]; then
         cmd_exists docker-php-source || die "docker-php-source command not found"
@@ -560,7 +568,6 @@ module_file_exists=$(ext_module_file_exists "${ext}" && printf yes || printf no)
 EOF
 }
 
-# Build and install one core extension from the PHP source tree.
 ext_install_core() {
     ext="$1"
     jobs="$2"
@@ -652,7 +659,6 @@ ext_install_core() {
     cleanup_core_install
 }
 
-# Install one extension from PECL.
 ext_install_pecl() {
     ext="$1"
     version="$2"
@@ -703,6 +709,2329 @@ ext_install_pecl() {
     cleanup_pecl_install
 }
 
+machine_id_value() {
+    if [ -f /etc/machine-id ]; then
+        sed -n '1p' /etc/machine-id | tr -d '\r\n'
+        return 0
+    fi
+    if [ -f /var/lib/dbus/machine-id ]; then
+        sed -n '1p' /var/lib/dbus/machine-id | tr -d '\r\n'
+        return 0
+    fi
+    printf '%s\n' "-"
+}
+
+worker_detect_id() {
+    if [ -n "${PHPCTL_WORKER_ID}" ]; then
+        printf '%s\n' "${PHPCTL_WORKER_ID}"
+        return 0
+    fi
+    hostname 2>/dev/null || printf '%s\n' "unknown"
+}
+
+worker_detect_group() {
+    if [ -n "${PHPCTL_WORKER_GROUP}" ]; then
+        printf '%s\n' "${PHPCTL_WORKER_GROUP}"
+        return 0
+    fi
+    printf '%s\n' "-"
+}
+
+worker_labels_json() {
+    labels_file="$(mktemp_file)"
+    : > "${labels_file}"
+
+    if [ -n "${PHPCTL_WORKER_LABELS_JSON}" ]; then
+        PHPCTL_LABELS_JSON_INPUT="${PHPCTL_WORKER_LABELS_JSON}" "${PHP_BIN}" -r '
+            $json = getenv("PHPCTL_LABELS_JSON_INPUT");
+            $obj = json_decode((string) $json, true);
+            if (is_array($obj)) {
+                foreach ($obj as $k => $v) {
+                    if (is_scalar($v) || $v === null) {
+                        echo (string) $k, "\t", (string) $v, PHP_EOL;
+                    }
+                }
+            }
+        ' >> "${labels_file}" 2>/dev/null || true
+    fi
+
+    env | awk -F '=' '
+        index($1, "PHPCTL_WORKER_LABEL_") == 1 {
+            key = substr($1, length("PHPCTL_WORKER_LABEL_") + 1)
+            value = substr($0, length($1) + 2)
+            gsub(/__/, "-", key)
+            key = tolower(key)
+            gsub(/_/, "-", key)
+            print key "\t" value
+        }
+    ' >> "${labels_file}" 2>/dev/null || true
+
+    WORKER_LABELS_FILE="${labels_file}" "${PHP_BIN}" -r '
+        $file = getenv("WORKER_LABELS_FILE");
+        $out = [];
+        foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            if ($line === "") {
+                continue;
+            }
+            $parts = explode("\t", $line, 2);
+            $key = $parts[0] ?? "";
+            $value = $parts[1] ?? "";
+            if ($key === "") {
+                continue;
+            }
+            $out[$key] = $value;
+        }
+        ksort($out, SORT_NATURAL | SORT_FLAG_CASE);
+        echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PHP_EOL;
+    '
+    rm -f "${labels_file}"
+}
+
+worker_usage_collect() {
+    pool_count=0
+    active_pool_count=0
+    sum_pm_max_children=0
+
+    if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
+        pool_count="$(find "${PHP_FPM_POOL_AVAILABLE_DIR}" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d '[:space:]')"
+    fi
+
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        active_pool_count="$(find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | wc -l | tr -d '[:space:]')"
+        find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | while IFS= read -r pool_file; do
+            v="$(pool_config_get_value "${pool_file}" "pm.max_children" || true)"
+            case "${v:-}" in
+                ''|*[!0-9]*) printf '0\n' ;;
+                *) printf '%s\n' "${v}" ;;
+            esac
+        done > "${PHP_FPM_POOL_ACTIVE_DIR}/.phpctl_pm_max_children.tmp.$$" 2>/dev/null || true
+        if [ -f "${PHP_FPM_POOL_ACTIVE_DIR}/.phpctl_pm_max_children.tmp.$$" ]; then
+            sum_pm_max_children="$(awk '{ s += $1 } END { print s+0 }' "${PHP_FPM_POOL_ACTIVE_DIR}/.phpctl_pm_max_children.tmp.$$")"
+            rm -f "${PHP_FPM_POOL_ACTIVE_DIR}/.phpctl_pm_max_children.tmp.$$"
+        fi
+    fi
+
+    replicas="${active_pool_count}"
+
+    printf 'pool_count=%s\n' "${pool_count}"
+    printf 'active_pool_count=%s\n' "${active_pool_count}"
+    printf 'sum_pm_max_children=%s\n' "${sum_pm_max_children}"
+    printf 'replicas=%s\n' "${replicas}"
+}
+
+show_worker_info() {
+    emit_object <<EOF
+hostname=$(hostname 2>/dev/null || printf '%s' unknown)
+machine_id=$(machine_id_value)
+worker_id=$(worker_detect_id)
+worker_group=$(worker_detect_group)
+labels=$(worker_labels_json | tr -d '\n')
+EOF
+}
+
+show_worker_capacity() {
+    emit_object <<EOF
+max_pools=${PHPCTL_WORKER_MAX_POOLS}
+max_children_total=${PHPCTL_WORKER_MAX_CHILDREN_TOTAL}
+max_replicas=${PHPCTL_WORKER_MAX_REPLICAS}
+max_memory_mb=${PHPCTL_WORKER_MAX_MEMORY_MB}
+EOF
+}
+
+show_worker_usage() {
+    usage_tmp="$(mktemp_file)"
+    worker_usage_collect > "${usage_tmp}"
+    emit_object < "${usage_tmp}"
+    rm -f "${usage_tmp}"
+}
+
+show_worker_health() {
+    php_ok="no"
+    fpm_ok="no"
+    config_ok="no"
+    healthy="no"
+
+    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
+        php_ok="yes"
+    fi
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        pid="$(php_fpm_master_pid 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
+            fpm_ok="yes"
+        fi
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            config_ok="yes"
+        fi
+    fi
+
+    if [ "${php_ok}" = "yes" ] && [ "${config_ok}" = "yes" ]; then
+        healthy="yes"
+    fi
+
+    emit_object <<EOF
+healthy=${healthy}
+php=${php_ok}
+fpm=${fpm_ok}
+config_valid=${config_ok}
+worker_id=$(worker_detect_id)
+worker_group=$(worker_detect_group)
+EOF
+
+    [ "${healthy}" = "yes" ] || exit 1
+}
+
+worker_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} worker <info|capacity|usage|health|help>
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=worker
+usage=${PROG} worker <info|capacity|usage|health|help>
+subcommands=info,capacity,usage,health,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+handle_worker() {
+    [ $# -gt 0 ] || { worker_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            worker_usage
+            ;;
+        info)
+            shift
+            show_worker_info "$@"
+            ;;
+        capacity)
+            shift
+            show_worker_capacity "$@"
+            ;;
+        usage)
+            shift
+            show_worker_usage "$@"
+            ;;
+        health)
+            shift
+            show_worker_health "$@"
+            ;;
+        *)
+            die "Unknown worker subcommand: $1"
+            ;;
+    esac
+}
+
+pool_name_from_path() {
+    base="$(basename "$1")"
+    base="${base%.pool.conf}"
+    base="${base%.conf}"
+    printf '%s\n' "${base}"
+}
+
+pool_config_get_value() {
+    file="$1"
+    key="$2"
+    awk -F '=' -v key="${key}" '
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            v=$0
+            sub(/^[^=]*=[[:space:]]*/, "", v)
+            sub(/[[:space:]]+$/, "", v)
+            print v
+            exit
+        }
+    ' "${file}" 2>/dev/null || true
+}
+
+pool_meta_key_normalize() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+pool_meta_set() {
+    file="$1"
+    key="$(pool_meta_key_normalize "$2")"
+    value="$3"
+    tmp="$(mktemp_file)"
+    if [ -f "${file}" ]; then
+        awk -v prefix="${PHPCTL_POOL_META_PREFIX}" -v k="${key}" '
+            {
+                line=$0
+                if (line ~ "^;[[:space:]]*" prefix k "=") {
+                    next
+                }
+                print line
+            }
+        ' "${file}" > "${tmp}" || true
+    else
+        : > "${tmp}"
+    fi
+    printf '; %s%s=%s\n' "${PHPCTL_POOL_META_PREFIX}" "${key}" "${value}" >> "${tmp}"
+    mv "${tmp}" "${file}"
+}
+
+pool_meta_get() {
+    file="$1"
+    key="$(pool_meta_key_normalize "$2")"
+    awk -v prefix="${PHPCTL_POOL_META_PREFIX}" -v k="${key}" '
+        {
+            line=$0
+            sub(/^[[:space:]]*;[[:space:]]*/, "", line)
+            if (line ~ "^" prefix k "=") {
+                sub("^" prefix k "=", "", line)
+                print line
+                exit
+            }
+        }
+    ' "${file}" 2>/dev/null || true
+}
+
+pool_meta_all_tsv() {
+    file="$1"
+    awk -v prefix="${PHPCTL_POOL_META_PREFIX}" '
+        {
+            line=$0
+            sub(/^[[:space:]]*;[[:space:]]*/, "", line)
+            if (index(line, prefix) == 1) {
+                sub("^" prefix, "", line)
+                key=line
+                sub(/=.*/, "", key)
+                value=line
+                sub(/^[^=]*=/, "", value)
+                print key "\t" value
+            }
+        }
+    ' "${file}" 2>/dev/null || true
+}
+
+pool_meta_all_json() {
+    file="$1"
+    meta_file="$(mktemp_file)"
+    pool_meta_all_tsv "${file}" > "${meta_file}"
+    POOL_META_FILE="${meta_file}" "${PHP_BIN}" -r '
+        $file = getenv("POOL_META_FILE");
+        $out = [];
+        foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            if ($line === "") {
+                continue;
+            }
+            $parts = explode("\t", $line, 2);
+            $k = $parts[0] ?? "";
+            $v = $parts[1] ?? "";
+            if ($k === "") {
+                continue;
+            }
+            $out[$k] = $v;
+        }
+        ksort($out, SORT_NATURAL | SORT_FLAG_CASE);
+        echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), PHP_EOL;
+    '
+    rm -f "${meta_file}"
+}
+
+pool_content_without_metadata() {
+    file="$1"
+    awk -v prefix="${PHPCTL_POOL_META_PREFIX}" '
+        {
+            line=$0
+            stripped=line
+            sub(/^[[:space:]]*;[[:space:]]*/, "", stripped)
+            if (index(stripped, prefix) == 1) {
+                next
+            }
+            print line
+        }
+    ' "${file}"
+}
+
+pool_compose_file_with_metadata() {
+    content_file="$1"
+    metadata_file="$2"
+    target_file="$3"
+
+    : > "${target_file}"
+
+    if [ -s "${metadata_file}" ]; then
+        while IFS='	' read -r key value; do
+            [ -n "${key}" ] || continue
+            printf '; %s%s=%s\n' "${PHPCTL_POOL_META_PREFIX}" "$(pool_meta_key_normalize "${key}")" "${value}" >> "${target_file}"
+        done < "${metadata_file}"
+    fi
+
+    cat "${content_file}" >> "${target_file}"
+}
+
+pool_filter_match_file() {
+    file="$1"
+    filter="$2"
+    active="$3"
+    available="$4"
+
+    [ -n "${filter}" ] || return 0
+
+    filter_file="$(mktemp_file)"
+    printf '%s\n' "${filter}" | tr ',' '\n' > "${filter_file}"
+
+    while IFS= read -r condition; do
+        [ -n "${condition}" ] || continue
+        key="${condition%%=*}"
+        value="${condition#*=}"
+
+        [ "${key}" != "${condition}" ] || { rm -f "${filter_file}"; return 1; }
+
+        norm_key="$(pool_meta_key_normalize "${key}")"
+        case "${norm_key}" in
+            name)
+                actual="$(pool_name_from_path "${file}")"
+                ;;
+            active)
+                actual="${active}"
+                ;;
+            available)
+                actual="${available}"
+                ;;
+            path)
+                actual="${file}"
+                ;;
+            listen|pm|pm.max_children|pm.start_servers|pm.min_spare_servers|pm.max_spare_servers|user|group)
+                actual="$(pool_config_get_value "${file}" "${norm_key}")"
+                ;;
+            *)
+                actual="$(pool_meta_get "${file}" "${norm_key}")"
+                ;;
+        esac
+
+        if [ "${actual:-}" != "${value}" ]; then
+            rm -f "${filter_file}"
+            return 1
+        fi
+    done < "${filter_file}"
+
+    rm -f "${filter_file}"
+    return 0
+}
+
+resolve_pool_available() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}"
+    do
+        [ -f "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+resolve_pool_active() {
+    name="$1"
+    for candidate in \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.pool.conf" \
+        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}"
+    do
+        [ -e "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
+    done
+    return 1
+}
+
+fpm_default_pool_template() {
+    cat <<EOF
+[{{POOL_NAME}}]
+user = {{USER}}
+group = {{GROUP}}
+listen = {{LISTEN}}
+listen.owner = {{LISTEN_OWNER}}
+listen.group = {{LISTEN_GROUP}}
+pm = {{PM}}
+pm.max_children = {{PM_MAX_CHILDREN}}
+pm.start_servers = {{PM_START_SERVERS}}
+pm.min_spare_servers = {{PM_MIN_SPARE_SERVERS}}
+pm.max_spare_servers = {{PM_MAX_SPARE_SERVERS}}
+catch_workers_output = {{CATCH_WORKERS_OUTPUT}}
+clear_env = {{CLEAR_ENV}}
+{{ if ENABLE_PING }}
+ping.path = {{ PING_PATH | default("/fpm-ping") }}
+ping.response = {{ PING_RESPONSE | default("pong") }}
+{{ endif }}
+{{ if ENABLE_METRICS }}
+pm.status_path = {{ STATUS_PATH | default("/fpm-status") }}
+{{ endif }}
+EOF
+}
+
+pool_params_set() {
+    file="$1"
+    key="$2"
+    value="$3"
+    tmp="$(mktemp_file)"
+    if [ -f "${file}" ]; then
+        awk -F '=' -v k="${key}" '$1 != k { print }' "${file}" > "${tmp}" || true
+    else
+        : > "${tmp}"
+    fi
+    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}"
+    mv "${tmp}" "${file}"
+}
+
+pool_params_load_file() {
+    dst="$1"
+    src="$2"
+    [ -f "${src}" ] || die "Params file not found: ${src}"
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        case "${line}" in
+            \#*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        [ "${key}" != "${line}" ] || continue
+        pool_params_set "${dst}" "${key}" "${value}"
+    done < "${src}"
+}
+
+fpm_pool_build_params() {
+    name="$1"
+
+    params_file="$(mktemp_file)"
+    : > "${params_file}"
+
+    pool_params_set "${params_file}" "POOL_NAME" "${name}"
+    pool_params_set "${params_file}" "USER" "www-data"
+    pool_params_set "${params_file}" "GROUP" "www-data"
+    pool_params_set "${params_file}" "LISTEN" "/var/run/php-fpm-${name}.sock"
+    pool_params_set "${params_file}" "LISTEN_OWNER" "www-data"
+    pool_params_set "${params_file}" "LISTEN_GROUP" "www-data"
+    pool_params_set "${params_file}" "PM" "dynamic"
+    pool_params_set "${params_file}" "PM_MAX_CHILDREN" "8"
+    pool_params_set "${params_file}" "PM_START_SERVERS" "2"
+    pool_params_set "${params_file}" "PM_MIN_SPARE_SERVERS" "1"
+    pool_params_set "${params_file}" "PM_MAX_SPARE_SERVERS" "3"
+    pool_params_set "${params_file}" "CATCH_WORKERS_OUTPUT" "yes"
+    pool_params_set "${params_file}" "CLEAR_ENV" "no"
+    pool_params_set "${params_file}" "ENABLE_METRICS" "false"
+    pool_params_set "${params_file}" "STATUS_PATH" ""
+    pool_params_set "${params_file}" "ENABLE_PING" "false"
+    pool_params_set "${params_file}" "PING_PATH" ""
+    pool_params_set "${params_file}" "PING_RESPONSE" ""
+
+    printf '%s\n' "${params_file}"
+}
+
+fpm_pool_render_content() {
+    name="$1"
+    template_file="$2"
+    params_file="$3"
+
+    render_template="$(mktemp_file)"
+    if [ -n "${template_file}" ]; then
+        [ -f "${template_file}" ] || die "Template not found: ${template_file}"
+        cat "${template_file}" > "${render_template}"
+    elif [ -n "${PHP_FPM_POOL_TEMPLATE}" ]; then
+        [ -f "${PHP_FPM_POOL_TEMPLATE}" ] || die "Template not found: ${PHP_FPM_POOL_TEMPLATE}"
+        cat "${PHP_FPM_POOL_TEMPLATE}" > "${render_template}"
+    else
+        fpm_default_pool_template > "${render_template}"
+    fi
+
+    PHPCTL_TEMPLATE_FILE="${render_template}" PHPCTL_PARAMS_FILE="${params_file}" "${PHP_BIN}" -r '
+        function loadParams(string $file): array {
+            $params = [];
+            foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+                if ($line === "" || strpos($line, "#") === 0) {
+                    continue;
+                }
+                $parts = explode("=", $line, 2);
+                if (count($parts) === 2) {
+                    $params[$parts[0]] = $parts[1];
+                }
+            }
+            return $params;
+        }
+
+        function isTrueValue($value): bool {
+            $v = strtolower(trim((string) $value));
+            return in_array($v, ["1", "true", "yes", "on"], true);
+        }
+
+        function isEmptyValue($value): bool {
+            return trim((string) $value) === "";
+        }
+
+        function evalIfExpr(string $expr, array $params): bool {
+            $expr = trim($expr);
+
+            if (preg_match("/^empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
+                return isEmptyValue($params[$m[1]] ?? "");
+            }
+
+            if (preg_match("/^not\\s+empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
+                return !isEmptyValue($params[$m[1]] ?? "");
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)\\s*==\\s*(.+)$/i", $expr, $m)) {
+                $expected = trim($m[2]);
+                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
+                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
+                return (string) ($params[$m[1]] ?? "") === $expected;
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)\\s*!=\\s*(.+)$/i", $expr, $m)) {
+                $expected = trim($m[2]);
+                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
+                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
+                return (string) ($params[$m[1]] ?? "") !== $expected;
+            }
+
+            if (preg_match("/^([A-Z0-9_]+)$/i", $expr, $m)) {
+                return isTrueValue($params[$m[1]] ?? "");
+            }
+
+            return false;
+        }
+
+        function renderVars(string $text, array $params): string {
+            return preg_replace_callback("/\\{\\{\\s*([A-Z0-9_]+)(?:\\s*\\|\\s*default\\((.*?)\\))?\\s*\\}\\}/i", function ($m) use ($params) {
+                $key = $m[1];
+                $value = $params[$key] ?? "";
+                if (isset($m[2])) {
+                    $default = trim($m[2]);
+                    $default = preg_replace("/^\"(.*)\"$/", "$1", $default);
+                    $default = preg_replace("/^\x27(.*)\x27$/", "$1", $default);
+                    if (trim((string) $value) === "") {
+                        $value = $default;
+                    }
+                }
+                return (string) $value;
+            }, $text);
+        }
+
+        function renderTemplate(string $template, array $params): string {
+            $lines = preg_split("/\\r?\\n/", $template);
+            $out = [];
+            $stack = [true];
+
+            foreach ($lines as $line) {
+                if (preg_match("/^\\s*\\{\\{\\s*if\\s+(.+?)\\s*\\}\\}\\s*$/", $line, $m)) {
+                    $parent = end($stack);
+                    $stack[] = $parent && evalIfExpr($m[1], $params);
+                    continue;
+                }
+
+                if (preg_match("/^\\s*\\{\\{\\s*endif\\s*\\}\\}\\s*$/", $line)) {
+                    if (count($stack) > 1) {
+                        array_pop($stack);
+                    }
+                    continue;
+                }
+
+                if (end($stack)) {
+                    $out[] = renderVars($line, $params);
+                }
+            }
+
+            return implode(PHP_EOL, $out) . PHP_EOL;
+        }
+
+        $template = file_get_contents(getenv("PHPCTL_TEMPLATE_FILE"));
+        $params = loadParams(getenv("PHPCTL_PARAMS_FILE"));
+        echo renderTemplate($template, $params);
+    '
+    rm -f "${render_template}"
+}
+
+fpm_pool_render_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_render
+usage=${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_create_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_create
+usage=${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_upsert_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool upsert <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_upsert
+usage=${PROG} fpm pool upsert <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_generate_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--output-file <file>]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_generate
+usage=${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--meta KEY=VALUE ...] [--output-file <file>]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_import_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool import <name> --from <file> [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_import
+usage=${PROG} fpm pool import <name> --from <file> [--meta KEY=VALUE ...] [--enable]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_bundle_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm_pool_bundle
+usage=${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_render() {
+    [ $# -gt 0 ] || { fpm_pool_render_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}"
+                fpm_pool_render_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}"
+                die "Unknown pool render option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            fpm_pool_render_content "${name}" "${template_file}" "${params_file}"
+            ;;
+        json|tsv)
+            rendered_file="$(mktemp_file)"
+            fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
+            emit_object <<EOF
+pool=${name}
+template=$( [ -n "${template_file}" ] && printf '%s' "${template_file}" || printf '%s' "${PHP_FPM_POOL_TEMPLATE:-builtin}" )
+content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
+EOF
+            rm -f "${rendered_file}"
+            ;;
+        *)
+            rm -f "${params_file}"
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    rm -f "${params_file}"
+}
+
+fpm_pool_create() {
+    [ $# -gt 0 ] || { fpm_pool_create_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+    metadata_file="$(mktemp_file)"
+    enable_after="no"
+
+    : > "${metadata_file}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            --meta)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --meta"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid meta format: $1"; }
+                printf '%s\t%s\n' "${key}" "${value}" >> "${metadata_file}"
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}" "${metadata_file}"
+                fpm_pool_create_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}" "${metadata_file}"
+                die "Unknown pool create option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
+    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
+    rendered_file="$(mktemp_file)"
+    fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
+    pool_compose_file_with_metadata "${rendered_file}" "${metadata_file}" "${target}"
+    rm -f "${rendered_file}"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
+    fi
+
+    rm -f "${params_file}" "${metadata_file}"
+
+    emit_object <<EOF
+ok=yes
+action=create
+pool=${name}
+available=yes
+active=${enable_after}
+available_path=${target}
+active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
+metadata=$(pool_meta_all_json "${target}" | tr -d '\n')
+EOF
+}
+
+fpm_pool_upsert() {
+    [ $# -gt 0 ] || { fpm_pool_upsert_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+    metadata_file="$(mktemp_file)"
+    enable_after="no"
+
+    : > "${metadata_file}"
+
+    existed="no"
+    was_active="no"
+
+    if resolve_pool_available "${name}" >/dev/null 2>&1; then
+        existed="yes"
+    fi
+    if resolve_pool_active "${name}" >/dev/null 2>&1; then
+        was_active="yes"
+    fi
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            --meta)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --meta"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid meta format: $1"; }
+                printf '%s\t%s\n' "${key}" "${value}" >> "${metadata_file}"
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}" "${metadata_file}"
+                fpm_pool_upsert_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}" "${metadata_file}"
+                die "Unknown pool upsert option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
+    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
+    rendered_file="$(mktemp_file)"
+    fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
+    pool_compose_file_with_metadata "${rendered_file}" "${metadata_file}" "${target}"
+    rm -f "${rendered_file}"
+
+    if [ "${enable_after}" = "yes" ] || [ "${was_active}" = "yes" ]; then
+        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
+        active_now="yes"
+    else
+        active_now="no"
+    fi
+
+    rm -f "${params_file}" "${metadata_file}"
+
+    emit_object <<EOF
+ok=yes
+action=upsert
+pool=${name}
+changed=yes
+existed=${existed}
+available=yes
+active=${active_now}
+available_path=${target}
+active_path=$( [ "${active_now}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
+metadata=$(pool_meta_all_json "${target}" | tr -d '\n')
+EOF
+}
+
+fpm_pool_generate() {
+    [ $# -gt 0 ] || { fpm_pool_generate_usage; return 0; }
+    name="$1"
+    shift
+
+    template_file=""
+    params_override_file=""
+    params_file="$(fpm_pool_build_params "${name}")"
+    metadata_file="$(mktemp_file)"
+    output_file=""
+
+    : > "${metadata_file}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --template)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --template"; }
+                template_file="$1"
+                shift
+                ;;
+            --params-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --params-file"; }
+                params_override_file="$1"
+                shift
+                ;;
+            --output-file)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --output-file"; }
+                output_file="$1"
+                shift
+                ;;
+            -p|--param)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --param"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid param format: $1"; }
+                pool_params_set "${params_file}" "${key}" "${value}"
+                shift
+                ;;
+            --meta)
+                shift
+                [ $# -gt 0 ] || { rm -f "${params_file}" "${metadata_file}"; die "Missing value for --meta"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${params_file}" "${metadata_file}"; die "Invalid meta format: $1"; }
+                printf '%s\t%s\n' "${key}" "${value}" >> "${metadata_file}"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${params_file}" "${metadata_file}"
+                fpm_pool_generate_usage
+                return 0
+                ;;
+            *)
+                rm -f "${params_file}" "${metadata_file}"
+                die "Unknown pool generate option: $1"
+                ;;
+        esac
+    done
+
+    if [ -n "${params_override_file}" ]; then
+        pool_params_load_file "${params_file}" "${params_override_file}"
+    fi
+
+    rendered_file="$(mktemp_file)"
+    plain_file="$(mktemp_file)"
+    fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${plain_file}"
+    pool_compose_file_with_metadata "${plain_file}" "${metadata_file}" "${rendered_file}"
+
+    if [ -n "${output_file}" ]; then
+        cat "${rendered_file}" > "${output_file}"
+        emit_object <<EOF
+ok=yes
+action=generate
+pool=${name}
+output_file=${output_file}
+EOF
+    else
+        case "${OUTPUT_FORMAT}" in
+            text)
+                cat "${rendered_file}"
+                ;;
+            json|tsv)
+                emit_object <<EOF
+ok=yes
+action=generate
+pool=${name}
+content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
+EOF
+                ;;
+            *)
+                rm -f "${params_file}" "${metadata_file}" "${rendered_file}" "${plain_file}"
+                die "Unsupported output format: ${OUTPUT_FORMAT}"
+                ;;
+        esac
+    fi
+
+    rm -f "${params_file}" "${metadata_file}" "${rendered_file}" "${plain_file}"
+}
+
+fpm_pool_import() {
+    [ $# -gt 0 ] || { fpm_pool_import_usage; return 0; }
+    name="$1"
+    shift
+
+    src=""
+    enable_after="no"
+    metadata_file="$(mktemp_file)"
+    : > "${metadata_file}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)
+                shift
+                [ $# -gt 0 ] || { rm -f "${metadata_file}"; die "Missing value for --from"; }
+                src="$1"
+                shift
+                ;;
+            --meta)
+                shift
+                [ $# -gt 0 ] || { rm -f "${metadata_file}"; die "Missing value for --meta"; }
+                key="${1%%=*}"
+                value="${1#*=}"
+                [ "${key}" != "${1}" ] || { rm -f "${metadata_file}"; die "Invalid meta format: $1"; }
+                printf '%s\t%s\n' "${key}" "${value}" >> "${metadata_file}"
+                shift
+                ;;
+            --enable)
+                enable_after="yes"
+                shift
+                ;;
+            -h|--help)
+                rm -f "${metadata_file}"
+                fpm_pool_import_usage
+                return 0
+                ;;
+            *)
+                rm -f "${metadata_file}"
+                die "Unknown pool import option: $1"
+                ;;
+        esac
+    done
+
+    [ -n "${src}" ] || { rm -f "${metadata_file}"; die "Missing required option --from"; }
+    [ -f "${src}" ] || { rm -f "${metadata_file}"; die "Pool source file not found: ${src}"; }
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
+    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
+    plain_file="$(mktemp_file)"
+    pool_content_without_metadata "${src}" > "${plain_file}"
+    pool_compose_file_with_metadata "${plain_file}" "${metadata_file}" "${target}"
+    rm -f "${plain_file}" "${metadata_file}"
+
+    if [ "${enable_after}" = "yes" ]; then
+        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
+    fi
+
+    emit_object <<EOF
+ok=yes
+action=import
+pool=${name}
+available=yes
+active=${enable_after}
+available_path=${target}
+active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
+metadata=$(pool_meta_all_json "${target}" | tr -d '\n')
+EOF
+}
+
+fpm_pool_content() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool content <name>"
+    name="$1"
+    file="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+    [ -n "${file}" ] || die "Pool not found in available dir: ${name}"
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat "${file}"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+pool=${name}
+path=${file}
+content=$(tr '\n' ' ' < "${file}" | sed 's/[[:space:]]\+/ /g')
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_pool_bundle_import() {
+    json_string=""
+    json_file=""
+    do_reload="no"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --json)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --json"
+                json_string="$1"
+                shift
+                ;;
+            --json-file)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --json-file"
+                json_file="$1"
+                shift
+                ;;
+            --reload)
+                do_reload="yes"
+                shift
+                ;;
+            -h|--help)
+                fpm_pool_bundle_usage
+                return 0
+                ;;
+            *)
+                die "Unknown pool bundle import option: $1"
+                ;;
+        esac
+    done
+
+    [ -n "${json_string}" ] || [ -n "${json_file}" ] || die "One of --json or --json-file is required"
+    [ -z "${json_string}" ] || [ -z "${json_file}" ] || die "Use only one of --json or --json-file"
+
+    input_file="$(mktemp_file)"
+    result_file="$(mktemp_file)"
+
+    if [ -n "${json_file}" ]; then
+        [ -f "${json_file}" ] || { rm -f "${input_file}" "${result_file}"; die "JSON file not found: ${json_file}"; }
+        cp "${json_file}" "${input_file}"
+    else
+        printf '%s\n' "${json_string}" > "${input_file}"
+    fi
+
+    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}" "${PHP_FPM_POOL_ACTIVE_DIR}"
+
+    PHPCTL_JSON_FILE="${input_file}" \
+    PHPCTL_RESULT_FILE="${result_file}" \
+    PHPCTL_SELF_PATH="${SELF_PATH}" \
+    "${PHP_BIN}" -r '
+        function fail(string $message): void {
+            fwrite(STDERR, $message . PHP_EOL);
+            exit(1);
+        }
+
+        function writeParamsFile(array $params): string {
+            $file = tempnam(sys_get_temp_dir(), "phpctl_pool_params_");
+            if ($file === false) {
+                fail("Unable to create params file");
+            }
+            $lines = [];
+            foreach ($params as $k => $v) {
+                $lines[] = $k . "=" . (string) $v;
+            }
+            file_put_contents($file, implode(PHP_EOL, $lines) . PHP_EOL);
+            return $file;
+        }
+
+        function buildMetaArgs(array $meta): array {
+            $args = [];
+            foreach ($meta as $k => $v) {
+                if (is_scalar($v) || $v === null) {
+                    $args[] = "--meta";
+                    $args[] = (string) $k . "=" . (string) $v;
+                }
+            }
+            return $args;
+        }
+
+        $json = file_get_contents(getenv("PHPCTL_JSON_FILE"));
+        if ($json === false || trim($json) === "") {
+            fail("Empty JSON bundle");
+        }
+
+        $data = json_decode($json, true);
+        if (!is_array($data)) {
+            fail("Invalid JSON bundle");
+        }
+
+        $defaultEnabled = isset($data["enabled"]) ? (bool) $data["enabled"] : true;
+        $pools = $data["pools"] ?? null;
+        if (!is_array($pools)) {
+            fail("Bundle must contain pools array");
+        }
+
+        $result = [];
+
+        foreach ($pools as $pool) {
+            if (!is_array($pool)) {
+                fail("Invalid pool entry");
+            }
+
+            $name = (string) ($pool["name"] ?? "");
+            if ($name === "") {
+                fail("Pool name is required");
+            }
+
+            $template = (string) ($pool["template"] ?? "");
+            $enabled = array_key_exists("enabled", $pool) ? (bool) $pool["enabled"] : $defaultEnabled;
+            $params = $pool["params"] ?? [];
+            $meta = $pool["meta"] ?? [];
+            if (!is_array($params)) {
+                fail("Pool params must be an object");
+            }
+            if (!is_array($meta)) {
+                fail("Pool meta must be an object");
+            }
+
+            $renderParams = [
+                "POOL_NAME" => $name,
+                "USER" => "www-data",
+                "GROUP" => "www-data",
+                "LISTEN" => "/var/run/php-fpm-" . $name . ".sock",
+                "LISTEN_OWNER" => "www-data",
+                "LISTEN_GROUP" => "www-data",
+                "PM" => "dynamic",
+                "PM_MAX_CHILDREN" => "8",
+                "PM_START_SERVERS" => "2",
+                "PM_MIN_SPARE_SERVERS" => "1",
+                "PM_MAX_SPARE_SERVERS" => "3",
+                "CATCH_WORKERS_OUTPUT" => "yes",
+                "CLEAR_ENV" => "no",
+                "ENABLE_METRICS" => "false",
+                "STATUS_PATH" => "",
+                "ENABLE_PING" => "false",
+                "PING_PATH" => "",
+                "PING_RESPONSE" => "",
+            ];
+
+            foreach ($params as $k => $v) {
+                $renderParams[(string) $k] = is_scalar($v) || $v === null ? (string) $v : json_encode($v);
+            }
+
+            $paramsFile = writeParamsFile($renderParams);
+            $cmd = [getenv("PHPCTL_SELF_PATH"), "fpm", "pool", "upsert", $name, "--params-file", $paramsFile];
+
+            if ($template !== "") {
+                $cmd[] = "--template";
+                $cmd[] = $template;
+            }
+
+            foreach (buildMetaArgs($meta) as $metaArg) {
+                $cmd[] = $metaArg;
+            }
+
+            if ($enabled) {
+                $cmd[] = "--enable";
+            }
+
+            $descriptors = [
+                0 => ["pipe", "r"],
+                1 => ["pipe", "w"],
+                2 => ["pipe", "w"],
+            ];
+            $proc = proc_open($cmd, $descriptors, $pipes);
+            if (!is_resource($proc)) {
+                @unlink($paramsFile);
+                fail("Unable to execute phpctl for pool " . $name);
+            }
+
+            fclose($pipes[0]);
+            $stdout = stream_get_contents($pipes[1]);
+            $stderr = stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            $exitCode = proc_close($proc);
+            @unlink($paramsFile);
+
+            if ($exitCode !== 0) {
+                fail("Pool " . $name . " failed: " . trim((string) $stderr));
+            }
+
+            $result[] = [
+                "name" => $name,
+                "enabled" => $enabled,
+                "stdout" => trim((string) $stdout),
+            ];
+        }
+
+        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+
+    if [ "${do_reload}" = "yes" ]; then
+        fpm_reload >/dev/null 2>&1 || true
+    fi
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'ok: yes\n'
+            printf 'action: bundle-import\n'
+            printf 'reload: %s\n' "${do_reload}"
+            printf 'result: %s\n' "$(cat "${result_file}")"
+            ;;
+        json|tsv)
+            emit_object <<EOF
+ok=yes
+action=bundle-import
+reload=${do_reload}
+result=$(cat "${result_file}")
+EOF
+            ;;
+        *)
+            rm -f "${input_file}" "${result_file}"
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    rm -f "${input_file}" "${result_file}"
+}
+
+fpm_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} fpm <subcommand> [args]
+
+Subcommands:
+  status               Show php-fpm binary and config test result
+  test                 Run php-fpm -t
+  configtest           Alias of test
+  reload               Reload php-fpm master process
+  capacity             Show worker pool capacity and usage
+  pool list            List available and active pools
+  pool render <name>   Render pool file content
+  pool create <name>   Create pool config in the available dir
+  pool upsert <name>   Create or update pool config in the available dir
+  pool generate <name> Generate pool config for manual editing
+  pool import <name>   Import existing pool config file
+  pool bundle import   Import multiple pools from JSON
+  pool enable <name>   Enable pool config by linking it into active dir
+  pool disable <name>  Disable pool config by removing it from active dir
+  pool delete <name>   Delete pool config
+  pool content <name>  Show raw pool config content
+  pool validate <name> Validate pool config by running php-fpm -t
+  pool show <name>     Show pool metadata and file paths
+  help                 Show this help
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=fpm
+usage=${PROG} fpm <subcommand> [args]
+subcommands=status,test,configtest,reload,capacity,pool list,pool render,pool create,pool upsert,pool generate,pool import,pool bundle import,pool enable,pool disable,pool delete,pool content,pool validate,pool show,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+fpm_status() {
+    bin_path="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
+    available="no"
+    config_ok="no"
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        available="yes"
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            config_ok="yes"
+        fi
+    fi
+
+    emit_object <<EOF
+php_fpm_bin=${bin_path}
+available=${available}
+config_ok=${config_ok}
+master_pid=$(php_fpm_master_pid 2>/dev/null || printf '%s' -)
+EOF
+}
+
+fpm_test() {
+    if ! cmd_exists "${PHP_FPM_BIN}"; then
+        die "php-fpm binary not found"
+    fi
+
+    if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+        status="ok"
+        ok="yes"
+        details="configuration valid"
+    else
+        status="fail"
+        ok="no"
+        details="configuration invalid"
+    fi
+
+    emit_object <<EOF
+ok=${ok}
+status=${status}
+details=${details}
+EOF
+}
+
+fpm_reload() {
+    cmd_exists "${PHP_FPM_BIN}" || die "php-fpm binary not found"
+    "${PHP_FPM_BIN}" -t >/dev/null 2>&1 || die "php-fpm configuration invalid"
+
+    pid="$(php_fpm_master_pid 2>/dev/null || true)"
+    [ -n "${pid}" ] || die "php-fpm master process not found"
+
+    kill -s "${PHP_FPM_RELOAD_SIGNAL}" "${pid}" >/dev/null 2>&1 || die "Unable to send reload signal"
+
+    emit_object <<EOF
+ok=yes
+status=ok
+signal=${PHP_FPM_RELOAD_SIGNAL}
+pid=${pid}
+details=reloaded
+EOF
+}
+
+fpm_capacity() {
+    usage_file="$(mktemp_file)"
+    worker_usage_collect > "${usage_file}"
+
+    pool_count="$(sed -n 's/^pool_count=//p' "${usage_file}" | head -n1)"
+    active_pool_count="$(sed -n 's/^active_pool_count=//p' "${usage_file}" | head -n1)"
+    sum_pm_max_children="$(sed -n 's/^sum_pm_max_children=//p' "${usage_file}" | head -n1)"
+    replicas="$(sed -n 's/^replicas=//p' "${usage_file}" | head -n1)"
+    rm -f "${usage_file}"
+
+    free_pools="-"
+    free_children="-"
+    free_replicas="-"
+
+    case "${PHPCTL_WORKER_MAX_POOLS}" in
+        ''|0|*[!0-9]*) ;;
+        *) free_pools=$((PHPCTL_WORKER_MAX_POOLS - active_pool_count)); [ "${free_pools}" -lt 0 ] && free_pools=0 ;;
+    esac
+
+    case "${PHPCTL_WORKER_MAX_CHILDREN_TOTAL}" in
+        ''|0|*[!0-9]*) ;;
+        *) free_children=$((PHPCTL_WORKER_MAX_CHILDREN_TOTAL - sum_pm_max_children)); [ "${free_children}" -lt 0 ] && free_children=0 ;;
+    esac
+
+    case "${PHPCTL_WORKER_MAX_REPLICAS}" in
+        ''|0|*[!0-9]*) ;;
+        *) free_replicas=$((PHPCTL_WORKER_MAX_REPLICAS - replicas)); [ "${free_replicas}" -lt 0 ] && free_replicas=0 ;;
+    esac
+
+    emit_object <<EOF
+max_pools=${PHPCTL_WORKER_MAX_POOLS}
+max_children_total=${PHPCTL_WORKER_MAX_CHILDREN_TOTAL}
+max_replicas=${PHPCTL_WORKER_MAX_REPLICAS}
+max_memory_mb=${PHPCTL_WORKER_MAX_MEMORY_MB}
+pool_count=${pool_count}
+active_pool_count=${active_pool_count}
+sum_pm_max_children=${sum_pm_max_children}
+replicas=${replicas}
+free_pools=${free_pools}
+free_children=${free_children}
+free_replicas=${free_replicas}
+EOF
+}
+
+fpm_pool_list() {
+    filter=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --filter)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --filter"
+                filter="$1"
+                shift
+                ;;
+            -h|--help)
+                case "${OUTPUT_FORMAT}" in
+                    text)
+                        cat <<EOF
+Usage:
+  ${PROG} fpm pool list [--filter "key=value,key2=value2"]
+EOF
+                        ;;
+                    json|tsv)
+                        emit_object <<EOF
+section=fpm_pool_list
+usage=${PROG} fpm pool list [--filter "key=value,key2=value2"]
+EOF
+                        ;;
+                    *)
+                        die "Unsupported output format: ${OUTPUT_FORMAT}"
+                        ;;
+                esac
+                return 0
+                ;;
+            *)
+                die "Unknown pool list option: $1"
+                ;;
+        esac
+    done
+
+    tmp_names="$(mktemp_file)"
+    tmp_rows="$(mktemp_file)"
+    : > "${tmp_names}"
+
+    if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
+        for f in "${PHP_FPM_POOL_AVAILABLE_DIR}"/*; do
+            [ -e "${f}" ] || continue
+            pool_name_from_path "${f}" >> "${tmp_names}"
+        done
+    fi
+
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        for f in "${PHP_FPM_POOL_ACTIVE_DIR}"/*; do
+            [ -e "${f}" ] || continue
+            case "$(basename "${f}")" in
+                *.conf|*.pool.conf) pool_name_from_path "${f}" >> "${tmp_names}" ;;
+            esac
+        done
+    fi
+
+    printf 'name\tavailable\tactive\tlisten\tpm\tpm_max_children\tmanaged_by\tallocation_id\treplica\tavailable_path\tactive_path\tmetadata_json\n' > "${tmp_rows}"
+
+    if [ -s "${tmp_names}" ]; then
+        sort -fu "${tmp_names}" | while IFS= read -r name; do
+            [ -n "${name}" ] || continue
+            avail="no"
+            active="no"
+            available_path="-"
+            active_path="-"
+            ref_file=""
+
+            if resolve_pool_available "${name}" >/dev/null 2>&1; then
+                avail="yes"
+                available_path="$(resolve_pool_available "${name}")"
+                ref_file="${available_path}"
+            fi
+
+            if resolve_pool_active "${name}" >/dev/null 2>&1; then
+                active="yes"
+                active_path="$(resolve_pool_active "${name}")"
+                [ -n "${ref_file}" ] || ref_file="${active_path}"
+            fi
+
+            [ -n "${ref_file}" ] || continue
+            pool_filter_match_file "${ref_file}" "${filter}" "${active}" "${avail}" || continue
+
+            listen="$(pool_config_get_value "${ref_file}" "listen")"
+            pm="$(pool_config_get_value "${ref_file}" "pm")"
+            pm_max_children="$(pool_config_get_value "${ref_file}" "pm.max_children")"
+            managed_by="$(pool_meta_get "${ref_file}" "managed-by")"
+            allocation_id="$(pool_meta_get "${ref_file}" "allocation-id")"
+            replica="$(pool_meta_get "${ref_file}" "replica")"
+            metadata_json="$(pool_meta_all_json "${ref_file}" | tr -d '\n')"
+
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "${name}" "${avail}" "${active}" "${listen}" "${pm}" "${pm_max_children}" "${managed_by}" "${allocation_id}" "${replica}" "${available_path}" "${active_path}" "${metadata_json}"
+        done >> "${tmp_rows}"
+    fi
+
+    render_table_file "${tmp_rows}"
+    rm -f "${tmp_names}" "${tmp_rows}"
+}
+
+fpm_pool_enable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool enable <name>"
+    name="$1"
+    src="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+    [ -n "${src}" ] || die "Pool not found in available dir: ${name}"
+
+    mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
+    ln -sf "${src}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")"
+
+    emit_object <<EOF
+ok=yes
+action=enable
+pool=${name}
+active=yes
+active_path=${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")
+EOF
+}
+
+fpm_pool_disable() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool disable <name>"
+    name="$1"
+    dst="$(resolve_pool_active "${name}" 2>/dev/null || true)"
+    [ -n "${dst}" ] || die "Pool not active: ${name}"
+
+    rm -f "${dst}"
+
+    emit_object <<EOF
+ok=yes
+action=disable
+pool=${name}
+active=no
+removed_path=${dst}
+EOF
+}
+
+fpm_pool_delete() {
+    name=""
+    filter=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --filter)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --filter"
+                filter="$1"
+                shift
+                ;;
+            -h|--help)
+                case "${OUTPUT_FORMAT}" in
+                    text)
+                        cat <<EOF
+Usage:
+  ${PROG} fpm pool delete <name>
+  ${PROG} fpm pool delete --filter "key=value,key2=value2"
+EOF
+                        ;;
+                    json|tsv)
+                        emit_object <<EOF
+section=fpm_pool_delete
+usage=${PROG} fpm pool delete <name> | ${PROG} fpm pool delete --filter "key=value,key2=value2"
+EOF
+                        ;;
+                    *)
+                        die "Unsupported output format: ${OUTPUT_FORMAT}"
+                        ;;
+                esac
+                return 0
+                ;;
+            *)
+                if [ -z "${name}" ]; then
+                    name="$1"
+                    shift
+                else
+                    die "Unknown pool delete option: $1"
+                fi
+                ;;
+        esac
+    done
+
+    if [ -n "${name}" ] && [ -n "${filter}" ]; then
+        die "Use either pool name or --filter, not both"
+    fi
+
+    if [ -z "${name}" ] && [ -z "${filter}" ]; then
+        die "Provide pool name or --filter"
+    fi
+
+    tmp="$(mktemp_file)"
+    printf 'name\tavailable_path\tactive_path\tremoved\n' > "${tmp}"
+
+    if [ -n "${name}" ]; then
+        active_path="$(resolve_pool_active "${name}" 2>/dev/null || true)"
+        available_path="$(resolve_pool_available "${name}" 2>/dev/null || true)"
+        [ -n "${active_path}" ] && rm -f "${active_path}"
+        [ -n "${available_path}" ] && rm -f "${available_path}"
+        printf '%s\t%s\t%s\tyes\n' "${name}" "${available_path:-"-"}" "${active_path:-"-"}" >> "${tmp}"
+    else
+        names_file="$(mktemp_file)"
+        : > "${names_file}"
+
+        if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
+            for f in "${PHP_FPM_POOL_AVAILABLE_DIR}"/*.conf; do
+                [ -e "${f}" ] || continue
+                pool_name_from_path "${f}" >> "${names_file}"
+            done
+        fi
+
+        if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+            for f in "${PHP_FPM_POOL_ACTIVE_DIR}"/*.conf; do
+                [ -e "${f}" ] || continue
+                pool_name_from_path "${f}" >> "${names_file}"
+            done
+        fi
+
+        if [ -s "${names_file}" ]; then
+            sort -fu "${names_file}" | while IFS= read -r pool_name; do
+                [ -n "${pool_name}" ] || continue
+                available_path="$(resolve_pool_available "${pool_name}" 2>/dev/null || true)"
+                active_path="$(resolve_pool_active "${pool_name}" 2>/dev/null || true)"
+                ref_file="${available_path:-${active_path:-}}"
+                [ -n "${ref_file}" ] || continue
+
+                avail="no"
+                active="no"
+                [ -n "${available_path}" ] && avail="yes"
+                [ -n "${active_path}" ] && active="yes"
+
+                pool_filter_match_file "${ref_file}" "${filter}" "${active}" "${avail}" || continue
+
+                [ -n "${active_path}" ] && rm -f "${active_path}"
+                [ -n "${available_path}" ] && rm -f "${available_path}"
+
+                printf '%s\t%s\t%s\tyes\n' "${pool_name}" "${available_path:-"-"}" "${active_path:-"-"}"
+            done >> "${tmp}"
+        fi
+
+        rm -f "${names_file}"
+    fi
+
+    render_table_file "${tmp}"
+    rm -f "${tmp}"
+}
+
+fpm_pool_validate() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool validate <name>"
+    name="$1"
+    resolve_pool_available "${name}" >/dev/null 2>&1 || die "Pool not found in available dir: ${name}"
+    fpm_test
+}
+
+fpm_pool_show() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool show <name>"
+    name="$1"
+
+    avail="no"
+    active="no"
+    available_path="-"
+    active_path="-"
+    ref_file=""
+
+    if resolve_pool_available "${name}" >/dev/null 2>&1; then
+        avail="yes"
+        available_path="$(resolve_pool_available "${name}")"
+        ref_file="${available_path}"
+    fi
+
+    if resolve_pool_active "${name}" >/dev/null 2>&1; then
+        active="yes"
+        active_path="$(resolve_pool_active "${name}")"
+        [ -n "${ref_file}" ] || ref_file="${active_path}"
+    fi
+
+    [ -n "${ref_file}" ] || die "Pool not found: ${name}"
+
+    emit_object <<EOF
+pool=${name}
+available=${avail}
+active=${active}
+available_path=${available_path}
+active_path=${active_path}
+listen=$(pool_config_get_value "${ref_file}" "listen")
+pm=$(pool_config_get_value "${ref_file}" "pm")
+pm_max_children=$(pool_config_get_value "${ref_file}" "pm.max_children")
+pm_start_servers=$(pool_config_get_value "${ref_file}" "pm.start_servers")
+pm_min_spare_servers=$(pool_config_get_value "${ref_file}" "pm.min_spare_servers")
+pm_max_spare_servers=$(pool_config_get_value "${ref_file}" "pm.max_spare_servers")
+user=$(pool_config_get_value "${ref_file}" "user")
+group=$(pool_config_get_value "${ref_file}" "group")
+managed_by=$(pool_meta_get "${ref_file}" "managed-by")
+allocation_id=$(pool_meta_get "${ref_file}" "allocation-id")
+replica=$(pool_meta_get "${ref_file}" "replica")
+worker_id=$(pool_meta_get "${ref_file}" "worker-id")
+worker_group=$(pool_meta_get "${ref_file}" "worker-group")
+metadata=$(pool_meta_all_json "${ref_file}" | tr -d '\n')
+EOF
+}
+
+handle_fpm() {
+    [ $# -gt 0 ] || { fpm_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            fpm_usage
+            ;;
+        status)
+            shift
+            fpm_status "$@"
+            ;;
+        test)
+            shift
+            fpm_test "$@"
+            ;;
+        configtest)
+            shift
+            fpm_test "$@"
+            ;;
+        reload)
+            shift
+            fpm_reload "$@"
+            ;;
+        capacity)
+            shift
+            fpm_capacity "$@"
+            ;;
+        pool)
+            shift
+            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|render|create|upsert|generate|import|bundle|enable|disable|delete|content|validate|show> ..."
+            case "$1" in
+                help|--help|-h)
+                    fpm_usage
+                    ;;
+                list)
+                    shift
+                    fpm_pool_list "$@"
+                    ;;
+                render)
+                    shift
+                    fpm_pool_render "$@"
+                    ;;
+                create)
+                    shift
+                    fpm_pool_create "$@"
+                    ;;
+                upsert)
+                    shift
+                    fpm_pool_upsert "$@"
+                    ;;
+                generate)
+                    shift
+                    fpm_pool_generate "$@"
+                    ;;
+                import)
+                    shift
+                    fpm_pool_import "$@"
+                    ;;
+                bundle)
+                    shift
+                    [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool bundle import ..."
+                    case "$1" in
+                        import)
+                            shift
+                            fpm_pool_bundle_import "$@"
+                            ;;
+                        *)
+                            die "Unknown fpm pool bundle subcommand: $1"
+                            ;;
+                    esac
+                    ;;
+                enable)
+                    shift
+                    fpm_pool_enable "$@"
+                    ;;
+                disable)
+                    shift
+                    fpm_pool_disable "$@"
+                    ;;
+                delete)
+                    shift
+                    fpm_pool_delete "$@"
+                    ;;
+                content)
+                    shift
+                    fpm_pool_content "$@"
+                    ;;
+                validate)
+                    shift
+                    fpm_pool_validate "$@"
+                    ;;
+                show)
+                    shift
+                    fpm_pool_show "$@"
+                    ;;
+                *)
+                    die "Unknown fpm pool subcommand: $1"
+                    ;;
+            esac
+            ;;
+        *)
+            die "Unknown fpm subcommand: $1"
+            ;;
+    esac
+}
+
+ini_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} ini <subcommand> [args]
+
+Subcommands:
+  show                 Show php ini information
+  get <key>            Read a single ini value
+  scan                 Show additional ini scan directory
+  loaded               Show loaded php.ini path
+  help                 Show this help
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=ini
+usage=${PROG} ini <subcommand> [args]
+subcommands=show,get,scan,loaded,help
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+ini_show() {
+    if [ "${OUTPUT_FORMAT}" = "text" ]; then
+        "${PHP_BIN}" --ini
+        return 0
+    fi
+
+    loaded_ini="$(php_loaded_ini)"
+    scan_dir="$(php_ini_scan_dir)"
+    parsed_files="$(php_parsed_ini_files | paste -sd ',' -)"
+    parsed_count="$(php_parsed_ini_files | awk 'NF { c++ } END { print c+0 }')"
+
+    emit_object <<EOF
+loaded_ini=${loaded_ini}
+scan_dir=${scan_dir}
+parsed_files_count=${parsed_count}
+parsed_files=${parsed_files}
+EOF
+}
+
+ini_get() {
+    [ $# -eq 1 ] || die "Usage: ${PROG} ini get <key>"
+    key="$1"
+    value="$("${PHP_BIN}" -r 'echo ini_get($argv[1]), PHP_EOL;' "${key}" 2>/dev/null || true)"
+
+    emit_object <<EOF
+key=${key}
+value=${value}
+EOF
+}
+
+ini_scan() {
+    emit_object <<EOF
+scan_dir=$(php_ini_scan_dir)
+EOF
+}
+
+ini_loaded() {
+    emit_object <<EOF
+loaded_ini=$(php_loaded_ini)
+EOF
+}
+
+handle_ini() {
+    [ $# -gt 0 ] || { ini_usage; return 0; }
+
+    case "$1" in
+        help|--help|-h)
+            ini_usage
+            ;;
+        show)
+            shift
+            ini_show "$@"
+            ;;
+        get)
+            shift
+            ini_get "$@"
+            ;;
+        scan)
+            shift
+            ini_scan "$@"
+            ;;
+        loaded)
+            shift
+            ini_loaded "$@"
+            ;;
+        *)
+            die "Unknown ini subcommand: $1"
+            ;;
+    esac
+}
+
+status_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} status
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=status
+usage=${PROG} status
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+health_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} health
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=health
+usage=${PROG} health
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+metrics_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} metrics
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=metrics
+usage=${PROG} metrics
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+serve_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} serve [--listen <socket|host:port>]
+
+Serve /healthz, /readyz, /status and /metrics over HTTP.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=serve
+usage=${PROG} serve [--listen <socket|host:port>]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+client_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
+
+Client configuration file:
+  ${PHPCTL_CLIENT_CONF}
+
+Config format:
+  host=
+  user=
+  password=
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=client
+usage=${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
+client_conf=${PHPCTL_CLIENT_CONF}
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+server_usage() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            cat <<EOF
+Usage:
+  ${PROG} server [--listen <socket|host:port>]
+
+Serve /healthz, /readyz, /status, /metrics and POST /run over HTTP.
+
+Notes:
+  - The built-in server does not enforce Basic Auth.
+  - Basic Auth can be added externally, for example with nginx.
+EOF
+            ;;
+        json|tsv)
+            emit_object <<EOF
+section=server
+usage=${PROG} server [--listen <socket|host:port>]
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
+prom_label_escape() {
+    "${PHP_BIN}" -r '
+        $s = (string) $argv[1];
+        $s = str_replace(["\\", "\"", "\n"], ["\\\\", "\\\"", "\\n"], $s);
+        echo $s;
+    ' "$1"
+}
+
+show_metrics_text() {
+    php_up=0
+    fpm_up=0
+    fpm_config_valid=0
+
+    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
+        php_up=1
+    fi
+
+    if cmd_exists "${PHP_FPM_BIN}"; then
+        pid="$(php_fpm_master_pid 2>/dev/null || true)"
+        if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
+            fpm_up=1
+        fi
+        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
+            fpm_config_valid=1
+        fi
+    fi
+
+    loaded_ext_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
+    pools_available="0"
+    pools_enabled="0"
+
+    [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ] && pools_available="$(find "${PHP_FPM_POOL_AVAILABLE_DIR}" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d '[:space:]')"
+    [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ] && pools_enabled="$(find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | wc -l | tr -d '[:space:]')"
+
+    printf '%s\n' '# HELP phpctl_php_up PHP CLI availability'
+    printf '%s\n' '# TYPE phpctl_php_up gauge'
+    printf 'phpctl_php_up %s\n' "${php_up}"
+
+    printf '%s\n' '# HELP phpctl_fpm_up PHP-FPM master process availability'
+    printf '%s\n' '# TYPE phpctl_fpm_up gauge'
+    printf 'phpctl_fpm_up %s\n' "${fpm_up}"
+
+    printf '%s\n' '# HELP phpctl_fpm_config_valid PHP-FPM configuration validity'
+    printf '%s\n' '# TYPE phpctl_fpm_config_valid gauge'
+    printf 'phpctl_fpm_config_valid %s\n' "${fpm_config_valid}"
+
+    printf '%s\n' '# HELP phpctl_extensions_loaded Number of loaded PHP extensions'
+    printf '%s\n' '# TYPE phpctl_extensions_loaded gauge'
+    printf 'phpctl_extensions_loaded %s\n' "${loaded_ext_count}"
+
+    printf '%s\n' '# HELP phpctl_fpm_pools_available Number of available FPM pools'
+    printf '%s\n' '# TYPE phpctl_fpm_pools_available gauge'
+    printf 'phpctl_fpm_pools_available %s\n' "${pools_available}"
+
+    printf '%s\n' '# HELP phpctl_fpm_pools_enabled Number of enabled FPM pools'
+    printf '%s\n' '# TYPE phpctl_fpm_pools_enabled gauge'
+    printf 'phpctl_fpm_pools_enabled %s\n' "${pools_enabled}"
+
+    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
+        find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | sort | while IFS= read -r pool_file; do
+            pool_name="$(pool_name_from_path "${pool_file}")"
+            listen_value="$(pool_config_get_value "${pool_file}" listen)"
+            socket_exists=0
+            if [ -n "${listen_value}" ]; then
+                case "${listen_value}" in
+                    /*) [ -S "${listen_value}" ] && socket_exists=1 ;;
+                esac
+            fi
+            printf 'phpctl_fpm_pool_enabled{pool="%s"} 1\n' "$(prom_label_escape "${pool_name}")"
+            printf 'phpctl_fpm_pool_socket_exists{pool="%s"} %s\n' "$(prom_label_escape "${pool_name}")" "${socket_exists}"
+        done
+    fi
+}
+
+show_metrics() {
+    case "${OUTPUT_FORMAT}" in
+        text)
+            show_metrics_text
+            ;;
+        json|tsv)
+            emit_object <<EOF
+php_up=$(cmd_exists "${PHP_BIN}" && ${PHP_BIN} -v >/dev/null 2>&1 && printf yes || printf no)
+fpm_up=$(pid="$(php_fpm_master_pid 2>/dev/null || true)"; [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1 && printf yes || printf no)
+fpm_config_valid=$(cmd_exists "${PHP_FPM_BIN}" && ${PHP_FPM_BIN} -t >/dev/null 2>&1 && printf yes || printf no)
+loaded_extensions=$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+}
+
 usage() {
     case "${OUTPUT_FORMAT}" in
         text)
@@ -727,6 +3056,7 @@ Commands:
   serve                Serve health, status and metrics
   server               Serve HTTP API for remote control
   client               Call remote phpctl API
+  worker               Show worker identity, labels and capacity
   ext                  Manage PHP extensions
   fpm                  Manage PHP-FPM pools and config
   ini                  Inspect PHP ini/config values
@@ -734,9 +3064,12 @@ Commands:
 Examples:
   ${PROG} version
   ${PROG} info
+  ${PROG} worker info
+  ${PROG} worker capacity
   ${PROG} ext list
   ${PROG} ext install redis --enable
-  ${PROG} fpm pool list
+  ${PROG} fpm pool list --filter "managed-by=orch,allocation-id=api-a"
+  ${PROG} fpm pool upsert api-a-r1 --meta managed-by=orch --meta allocation-id=api-a --enable
   ${PROG} fpm pool bundle import --json-file /tmp/pools.json --reload
   ${PROG} --server --listen 0.0.0.0:8080
   ${PROG} --client --host 127.0.0.1:8080 info
@@ -750,7 +3083,7 @@ EOF
 name=${PROG}
 version=${VERSION}
 usage=${PROG} [--output text|json|tsv] <command> [subcommand] [options]
-commands=help,version,info,paths,doctor,self-test,status,health,metrics,serve,server,client,ext,fpm,ini
+commands=help,version,info,paths,doctor,self-test,status,health,metrics,serve,server,client,worker,ext,fpm,ini
 default_output=${OUTPUT_FORMAT}
 output_formats=text,json,tsv
 EOF
@@ -1061,118 +3394,591 @@ EOF
     [ "${ok}" = "yes" ] || exit 1
 }
 
-pool_name_from_path() {
-    base="$(basename "$1")"
-    base="${base%.pool.conf}"
-    base="${base%.conf}"
-    printf '%s\n' "${base}"
+phpctl_is_unix_socket_endpoint() {
+    case "$1" in
+        /*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-pool_config_get_value() {
-    file="$1"
-    key="$2"
-    awk -F '=' -v key="${key}" '
-        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-            v=$0
-            sub(/^[^=]*=[[:space:]]*/, "", v)
-            sub(/[[:space:]]+$/, "", v)
-            print v
-            exit
+nc_supports_unix_sockets() {
+    "${NC_BIN}" 2>&1 | grep -q -- '-U'
+}
+
+nc_supports_exec() {
+    "${NC_BIN}" 2>&1 | grep -q -- '-e '
+}
+
+phpctl_validate_endpoint() {
+    endpoint="$1"
+
+    if phpctl_is_unix_socket_endpoint "${endpoint}"; then
+        return 0
+    fi
+
+    case "${endpoint}" in
+        *:*)
+            host_part="${endpoint%:*}"
+            port_part="${endpoint##*:}"
+            [ -n "${host_part}" ] || return 1
+            [ -n "${port_part}" ] || return 1
+            case "${port_part}" in
+                *[!0-9]*|'')
+                    return 1
+                    ;;
+            esac
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+http_extract_body() {
+    src="$1"
+    dst="$2"
+    awk '
+        BEGIN { body=0 }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (body) {
+                print line
+            } else if (line == "") {
+                body=1
+            }
         }
-    ' "${file}" 2>/dev/null || true
+    ' "${src}" > "${dst}"
 }
 
-prom_label_escape() {
-    "${PHP_BIN}" -r '
-        $s = (string) $argv[1];
-        $s = str_replace(["\\", "\"", "\n"], ["\\\\", "\\\"", "\\n"], $s);
-        echo $s;
-    ' "$1"
+http_read_request_meta() {
+    src="$1"
+    meta="$2"
+    awk '
+        BEGIN {
+            method=""
+            path=""
+            content_length="0"
+            headers_done=0
+        }
+        NR == 1 {
+            line=$0
+            sub(/\r$/, "", line)
+            split(line, p, " ")
+            method=p[1]
+            path=p[2]
+            next
+        }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (headers_done == 1) {
+                next
+            }
+            if (line == "") {
+                headers_done=1
+                next
+            }
+            if (line ~ /^[Cc]ontent-[Ll]ength:[[:space:]]*/) {
+                sub(/^[^:]*:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                content_length=line
+            }
+        }
+        END {
+            print "method=" method
+            print "path=" path
+            print "content_length=" content_length
+        }
+    ' "${src}" > "${meta}"
 }
 
-show_metrics_text() {
-    php_up=0
-    fpm_up=0
-    fpm_config_valid=0
+phpctl_client_load_config() {
+    conf_file="$1"
+    conf_host=""
+    conf_user=""
+    conf_password=""
 
-    if cmd_exists "${PHP_BIN}" && "${PHP_BIN}" -v >/dev/null 2>&1; then
-        php_up=1
+    [ -f "${conf_file}" ] || return 0
+
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        case "${line}" in
+            \#*) continue ;;
+        esac
+        key="${line%%=*}"
+        value="${line#*=}"
+        case "${key}" in
+            host) conf_host="${value}" ;;
+            user) conf_user="${value}" ;;
+            password|pasword) conf_password="${value}" ;;
+        esac
+    done < "${conf_file}"
+
+    [ -n "${PHPCTL_REMOTE_HOST}" ] || PHPCTL_REMOTE_HOST="${conf_host}"
+    if [ -z "${PHPCTL_REMOTE_CREDENTIALS}" ] && [ -n "${conf_user}" ] && [ -n "${conf_password}" ]; then
+        PHPCTL_REMOTE_CREDENTIALS="${conf_user}:${conf_password}"
+    fi
+}
+
+phpctl_client_build_payload() {
+    args_file="$(mktemp_file)"
+    payload_file="$(mktemp_file)"
+    : > "${args_file}"
+
+    for arg in "$@"; do
+        printf '%s\n' "${arg}" >> "${args_file}"
+    done
+
+    PHPCTL_ARGS_FILE="${args_file}" PHPCTL_PAYLOAD_FILE="${payload_file}" PHPCTL_OUTPUT_VALUE="${OUTPUT_FORMAT}" "${PHP_BIN}" -r '
+        $args = file(getenv("PHPCTL_ARGS_FILE"), FILE_IGNORE_NEW_LINES) ?: [];
+        $payload = [
+            "argv" => array_values($args),
+            "output" => getenv("PHPCTL_OUTPUT_VALUE") ?: "text",
+        ];
+        file_put_contents(getenv("PHPCTL_PAYLOAD_FILE"), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+
+    rm -f "${args_file}"
+    printf '%s\n' "${payload_file}"
+}
+
+phpctl_client_send_http() {
+    host="$1"
+    auth="$2"
+    payload_file="$3"
+
+    response_file="$(mktemp_file)"
+    request_file="$(mktemp_file)"
+    payload_len="$(wc -c < "${payload_file}" | tr -d '[:space:]')"
+    auth_header=""
+
+    if [ -n "${auth}" ]; then
+        auth_value="$("${PHP_BIN}" -r 'echo base64_encode($argv[1]);' "${auth}")"
+        auth_header="Authorization: Basic ${auth_value}\r\n"
     fi
 
-    if cmd_exists "${PHP_FPM_BIN}"; then
-        pid="$(php_fpm_master_pid 2>/dev/null || true)"
-        if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
-            fpm_up=1
-        fi
-        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
-            fpm_config_valid=1
-        fi
-    fi
+    {
+        printf 'POST /run HTTP/1.1\r\n'
+        printf 'Host: phpctl\r\n'
+        printf 'Content-Type: application/json\r\n'
+        printf 'Content-Length: %s\r\n' "${payload_len}"
+        printf '%b' "${auth_header}"
+        printf 'Connection: close\r\n'
+        printf '\r\n'
+        cat "${payload_file}"
+    } > "${request_file}"
 
-    loaded_ext_count="$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')"
-    pools_available="0"
-    pools_enabled="0"
+    case "${host}" in
+        /*)
+            nc_supports_unix_sockets || {
+                rm -f "${request_file}" "${response_file}"
+                die "Current nc implementation does not support Unix sockets (-U missing)"
+            }
+            "${NC_BIN}" -U "${host}" < "${request_file}" > "${response_file}" 2>/dev/null || {
+                rm -f "${request_file}" "${response_file}"
+                die "Unable to connect to socket: ${host}"
+            }
+            ;;
+        *)
+            tcp_host="${host%:*}"
+            tcp_port="${host##*:}"
+            [ -n "${tcp_host}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
+            [ -n "${tcp_port}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
+            "${NC_BIN}" "${tcp_host}" "${tcp_port}" < "${request_file}" > "${response_file}" 2>/dev/null || {
+                rm -f "${request_file}" "${response_file}"
+                die "Unable to connect to host: ${host}"
+            }
+            ;;
+    esac
 
-    [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ] && pools_available="$(find "${PHP_FPM_POOL_AVAILABLE_DIR}" -maxdepth 1 -type f -name '*.conf' | wc -l | tr -d '[:space:]')"
-    [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ] && pools_enabled="$(find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | wc -l | tr -d '[:space:]')"
+    rm -f "${request_file}"
+    printf '%s\n' "${response_file}"
+}
 
-    printf '%s\n' '# HELP phpctl_php_up PHP CLI availability'
-    printf '%s\n' '# TYPE phpctl_php_up gauge'
-    printf 'phpctl_php_up %s\n' "${php_up}"
+phpctl_client_consume_response() {
+    response_file="$1"
+    body_file="$(mktemp_file)"
 
-    printf '%s\n' '# HELP phpctl_fpm_up PHP-FPM master process availability'
-    printf '%s\n' '# TYPE phpctl_fpm_up gauge'
-    printf 'phpctl_fpm_up %s\n' "${fpm_up}"
+    http_extract_body "${response_file}" "${body_file}"
 
-    printf '%s\n' '# HELP phpctl_fpm_config_valid PHP-FPM configuration validity'
-    printf '%s\n' '# TYPE phpctl_fpm_config_valid gauge'
-    printf 'phpctl_fpm_config_valid %s\n' "${fpm_config_valid}"
+    PHPCTL_BODY_FILE="${body_file}" "${PHP_BIN}" -r '
+        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
+        if ($body === false || trim($body) === "") {
+            fwrite(STDERR, "Empty response body\n");
+            exit(1);
+        }
 
-    printf '%s\n' '# HELP phpctl_extensions_loaded Number of loaded PHP extensions'
-    printf '%s\n' '# TYPE phpctl_extensions_loaded gauge'
-    printf 'phpctl_extensions_loaded %s\n' "${loaded_ext_count}"
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            fwrite(STDERR, $body);
+            exit(1);
+        }
 
-    printf '%s\n' '# HELP phpctl_fpm_pools_available Number of available FPM pools'
-    printf '%s\n' '# TYPE phpctl_fpm_pools_available gauge'
-    printf 'phpctl_fpm_pools_available %s\n' "${pools_available}"
+        $stdout = (string) ($json["stdout"] ?? "");
+        $stderr = (string) ($json["stderr"] ?? "");
+        $exitCode = (int) ($json["exit_code"] ?? 1);
 
-    printf '%s\n' '# HELP phpctl_fpm_pools_enabled Number of enabled FPM pools'
-    printf '%s\n' '# TYPE phpctl_fpm_pools_enabled gauge'
-    printf 'phpctl_fpm_pools_enabled %s\n' "${pools_enabled}"
+        if ($stdout !== "") {
+            fwrite(STDOUT, $stdout);
+            if (substr($stdout, -1) !== "\n") {
+                fwrite(STDOUT, "\n");
+            }
+        }
 
-    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
-        find "${PHP_FPM_POOL_ACTIVE_DIR}" -maxdepth 1 \( -type f -o -type l \) -name '*.conf' | sort | while IFS= read -r pool_file; do
-            pool_name="$(pool_name_from_path "${pool_file}")"
-            listen_value="$(pool_config_get_value "${pool_file}" listen)"
-            socket_exists=0
-            if [ -n "${listen_value}" ]; then
-                case "${listen_value}" in
-                    /*) [ -S "${listen_value}" ] && socket_exists=1 ;;
-                esac
+        if ($stderr !== "") {
+            fwrite(STDERR, $stderr);
+            if (substr($stderr, -1) !== "\n") {
+                fwrite(STDERR, "\n");
+            }
+        }
+
+        exit($exitCode);
+    '
+    rc=$?
+    rm -f "${body_file}"
+    return "${rc}"
+}
+
+phpctl_client_run() {
+    host=""
+    credentials=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --host)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --host"
+                host="$1"
+                shift
+                ;;
+            --credentials)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --credentials"
+                credentials="$1"
+                shift
+                ;;
+            -h|--help)
+                client_usage
+                return 0
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    [ $# -gt 0 ] || die "Client requires a remote command"
+
+    PHPCTL_REMOTE_HOST="${host}"
+    PHPCTL_REMOTE_CREDENTIALS="${credentials}"
+    phpctl_client_load_config "${PHPCTL_CLIENT_CONF}"
+
+    [ -n "${PHPCTL_REMOTE_HOST}" ] || die "Remote host is not configured"
+    phpctl_validate_endpoint "${PHPCTL_REMOTE_HOST}" || die "Invalid remote host: ${PHPCTL_REMOTE_HOST}"
+
+    payload_file="$(phpctl_client_build_payload "$@")"
+    response_file="$(phpctl_client_send_http "${PHPCTL_REMOTE_HOST}" "${PHPCTL_REMOTE_CREDENTIALS}" "${payload_file}")"
+    rm -f "${payload_file}"
+
+    phpctl_client_consume_response "${response_file}"
+    rc=$?
+    rm -f "${response_file}"
+    return "${rc}"
+}
+
+phpctl_server_run_payload() {
+    body_file="$1"
+    result_file="$2"
+
+    PHPCTL_BODY_FILE="${body_file}" PHPCTL_RESULT_FILE="${result_file}" PHPCTL_SELF_PATH="${SELF_PATH}" "${PHP_BIN}" -r '
+        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
+        $data = json_decode((string) $body, true);
+
+        if (!is_array($data)) {
+            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+                "ok" => false,
+                "exit_code" => 1,
+                "stdout" => "",
+                "stderr" => "Invalid JSON payload",
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            exit(0);
+        }
+
+        $argv = $data["argv"] ?? [];
+        if (!is_array($argv)) {
+            $argv = [];
+        }
+
+        $output = (string) ($data["output"] ?? "text");
+
+        $cmd = [getenv("PHPCTL_SELF_PATH"), "--output", $output];
+        foreach ($argv as $arg) {
+            $cmd[] = (string) $arg;
+        }
+
+        $descriptors = [
+            0 => ["pipe", "r"],
+            1 => ["pipe", "w"],
+            2 => ["pipe", "w"],
+        ];
+
+        $proc = proc_open($cmd, $descriptors, $pipes);
+        if (!is_resource($proc)) {
+            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+                "ok" => false,
+                "exit_code" => 1,
+                "stdout" => "",
+                "stderr" => "Unable to spawn phpctl command",
+            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            exit(0);
+        }
+
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $exitCode = proc_close($proc);
+
+        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
+            "ok" => $exitCode === 0,
+            "exit_code" => $exitCode,
+            "stdout" => (string) $stdout,
+            "stderr" => (string) $stderr,
+        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+    '
+}
+
+phpctl_server_http_response() {
+    status_line="$1"
+    content_type="$2"
+    body_file="$3"
+
+    body_len="$(wc -c < "${body_file}" | tr -d '[:space:]')"
+    printf 'HTTP/1.1 %s\r\n' "${status_line}"
+    printf 'Content-Type: %s\r\n' "${content_type}"
+    printf 'Content-Length: %s\r\n' "${body_len}"
+    printf 'Connection: close\r\n'
+    printf '\r\n'
+    cat "${body_file}"
+}
+
+phpctl_serve_handle_connection() {
+    req_file="$(mktemp_file)"
+    response_body="$(mktemp_file)"
+    meta_file="$(mktemp_file)"
+    status_line="404 Not Found"
+    content_type="application/json"
+
+    cat > "${req_file}"
+    http_read_request_meta "${req_file}" "${meta_file}"
+
+    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
+    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
+
+    case "${method}:${path}" in
+        GET:/healthz|GET:/readyz)
+            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
+                status_line="200 OK"
+            else
+                printf '{"ok":false}\n' > "${response_body}"
+                status_line="503 Service Unavailable"
             fi
-            printf 'phpctl_fpm_pool_enabled{pool="%s"} 1\n' "$(prom_label_escape "${pool_name}")"
-            printf 'phpctl_fpm_pool_socket_exists{pool="%s"} %s\n' "$(prom_label_escape "${pool_name}")" "${socket_exists}"
-        done
-    fi
+            ;;
+        GET:/status)
+            "${SELF_PATH}" --output json status > "${response_body}"
+            status_line="200 OK"
+            ;;
+        GET:/metrics)
+            "${SELF_PATH}" --output text metrics > "${response_body}"
+            status_line="200 OK"
+            content_type="text/plain; version=0.0.4"
+            ;;
+        *)
+            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
+            status_line="404 Not Found"
+            ;;
+    esac
+
+    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
+
+    rm -f "${req_file}" "${response_body}" "${meta_file}"
 }
 
-show_metrics() {
+phpctl_server_handle_connection() {
+    req_file="$(mktemp_file)"
+    body_file="$(mktemp_file)"
+    response_body="$(mktemp_file)"
+    result_file="$(mktemp_file)"
+    meta_file="$(mktemp_file)"
+    status_line="404 Not Found"
+    content_type="application/json"
+
+    cat > "${req_file}"
+    http_read_request_meta "${req_file}" "${meta_file}"
+    http_extract_body "${req_file}" "${body_file}"
+
+    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
+    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
+    content_length="$(sed -n 's/^content_length=//p' "${meta_file}" | head -n1)"
+    [ -n "${content_length}" ] || content_length="0"
+
+    case "${method}:${path}" in
+        GET:/healthz|GET:/readyz)
+            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
+                status_line="200 OK"
+            else
+                printf '{"ok":false}\n' > "${response_body}"
+                status_line="503 Service Unavailable"
+            fi
+            ;;
+        GET:/status)
+            "${SELF_PATH}" --output json status > "${response_body}"
+            status_line="200 OK"
+            ;;
+        GET:/metrics)
+            "${SELF_PATH}" --output text metrics > "${response_body}"
+            status_line="200 OK"
+            content_type="text/plain; version=0.0.4"
+            ;;
+        POST:/run)
+            if [ "${content_length}" -gt 0 ] 2>/dev/null; then
+                phpctl_server_run_payload "${body_file}" "${result_file}"
+                cat "${result_file}" > "${response_body}"
+                status_line="200 OK"
+            else
+                printf '{"ok":false,"exit_code":1,"stdout":"","stderr":"Empty request body"}\n' > "${response_body}"
+                status_line="400 Bad Request"
+            fi
+            ;;
+        *)
+            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
+            status_line="404 Not Found"
+            ;;
+    esac
+
+    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
+
+    rm -f "${req_file}" "${body_file}" "${response_body}" "${result_file}" "${meta_file}"
+}
+
+phpctl_stdio_entrypoint_usage() {
+    cat <<EOF
+Internal command.
+EOF
+}
+
+phpctl_run_listener_forever() {
+    listen="$1"
+    mode="$2"
+
+    cmd_exists "${NC_BIN}" || die "nc binary not found"
+    nc_supports_exec || die "Current nc implementation does not support exec mode (-e). BusyBox nc with -e is required for the built-in server."
+
+    case "${listen}" in
+        /*)
+            nc_supports_unix_sockets || die "Current nc implementation does not support Unix sockets (-U missing)"
+            rm -f "${listen}"
+            while :; do
+                "${NC_BIN}" -l -U "${listen}" -e "${SELF_PATH}" "__${mode}_stdio"
+            done
+            ;;
+        *)
+            listen_host="${listen%:*}"
+            listen_port="${listen##*:}"
+            [ -n "${listen_host}" ] || die "Invalid listen value: ${listen}"
+            [ -n "${listen_port}" ] || die "Invalid listen value: ${listen}"
+            while :; do
+                "${NC_BIN}" -l -p "${listen_port}" -s "${listen_host}" -e "${SELF_PATH}" "__${mode}_stdio"
+            done
+            ;;
+    esac
+}
+
+phpctl_server_run() {
+    listen="${PHPCTL_SERVER_LISTEN}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --listen)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --listen"
+                listen="$1"
+                shift
+                ;;
+            -h|--help)
+                server_usage
+                return 0
+                ;;
+            *)
+                die "Unknown server option: $1"
+                ;;
+        esac
+    done
+
+    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
+
     case "${OUTPUT_FORMAT}" in
         text)
-            show_metrics_text
+            printf 'server_listen: %s\n' "${listen}" >&2
             ;;
         json|tsv)
             emit_object <<EOF
-php_up=$(cmd_exists "${PHP_BIN}" && ${PHP_BIN} -v >/dev/null 2>&1 && printf yes || printf no)
-fpm_up=$(pid="$(php_fpm_master_pid 2>/dev/null || true)"; [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1 && printf yes || printf no)
-fpm_config_valid=$(cmd_exists "${PHP_FPM_BIN}" && ${PHP_FPM_BIN} -t >/dev/null 2>&1 && printf yes || printf no)
-loaded_extensions=$(php_loaded_extensions_list | awk 'NF { c++ } END { print c+0 }')
+listen=${listen}
+mode=server
+transport=nc-exec
 EOF
             ;;
         *)
             die "Unsupported output format: ${OUTPUT_FORMAT}"
             ;;
     esac
+
+    phpctl_run_listener_forever "${listen}" "server"
+}
+
+serve_http() {
+    listen="${PHPCTL_SERVE_LISTEN}"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --listen)
+                shift
+                [ $# -gt 0 ] || die "Missing value for --listen"
+                listen="$1"
+                shift
+                ;;
+            -h|--help)
+                serve_usage
+                return 0
+                ;;
+            *)
+                die "Unknown serve option: $1"
+                ;;
+        esac
+    done
+
+    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
+
+    case "${OUTPUT_FORMAT}" in
+        text)
+            printf 'serve_listen: %s\n' "${listen}" >&2
+            ;;
+        json|tsv)
+            emit_object <<EOF
+listen=${listen}
+mode=serve
+transport=nc-exec
+EOF
+            ;;
+        *)
+            die "Unsupported output format: ${OUTPUT_FORMAT}"
+            ;;
+    esac
+
+    phpctl_run_listener_forever "${listen}" "serve"
 }
 
 ext_usage() {
@@ -1969,1989 +4775,6 @@ handle_ext() {
     esac
 }
 
-resolve_pool_available() {
-    name="$1"
-    for candidate in \
-        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf" \
-        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.pool.conf" \
-        "${PHP_FPM_POOL_AVAILABLE_DIR}/${name}"
-    do
-        [ -f "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
-    done
-    return 1
-}
-
-resolve_pool_active() {
-    name="$1"
-    for candidate in \
-        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.conf" \
-        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}.pool.conf" \
-        "${PHP_FPM_POOL_ACTIVE_DIR}/${name}"
-    do
-        [ -e "${candidate}" ] && { printf '%s\n' "${candidate}"; return 0; }
-    done
-    return 1
-}
-
-fpm_default_pool_template() {
-    cat <<EOF
-[{{POOL_NAME}}]
-user = {{USER}}
-group = {{GROUP}}
-listen = {{LISTEN}}
-listen.owner = {{LISTEN_OWNER}}
-listen.group = {{LISTEN_GROUP}}
-pm = {{PM}}
-pm.max_children = {{PM_MAX_CHILDREN}}
-pm.start_servers = {{PM_START_SERVERS}}
-pm.min_spare_servers = {{PM_MIN_SPARE_SERVERS}}
-pm.max_spare_servers = {{PM_MAX_SPARE_SERVERS}}
-catch_workers_output = {{CATCH_WORKERS_OUTPUT}}
-clear_env = {{CLEAR_ENV}}
-{{ if ENABLE_PING }}
-ping.path = {{ PING_PATH | default("/fpm-ping") }}
-ping.response = {{ PING_RESPONSE | default("pong") }}
-{{ endif }}
-{{ if ENABLE_METRICS }}
-pm.status_path = {{ STATUS_PATH | default("/fpm-status") }}
-{{ endif }}
-EOF
-}
-
-pool_params_set() {
-    file="$1"
-    key="$2"
-    value="$3"
-    tmp="$(mktemp_file)"
-    if [ -f "${file}" ]; then
-        awk -F '=' -v k="${key}" '$1 != k { print }' "${file}" > "${tmp}" || true
-    else
-        : > "${tmp}"
-    fi
-    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}"
-    mv "${tmp}" "${file}"
-}
-
-pool_params_load_file() {
-    dst="$1"
-    src="$2"
-    [ -f "${src}" ] || die "Params file not found: ${src}"
-    while IFS= read -r line; do
-        [ -n "${line}" ] || continue
-        case "${line}" in
-            \#*) continue ;;
-        esac
-        key="${line%%=*}"
-        value="${line#*=}"
-        [ "${key}" != "${line}" ] || continue
-        pool_params_set "${dst}" "${key}" "${value}"
-    done < "${src}"
-}
-
-fpm_pool_build_params() {
-    name="$1"
-
-    params_file="$(mktemp_file)"
-    : > "${params_file}"
-
-    pool_params_set "${params_file}" "POOL_NAME" "${name}"
-    pool_params_set "${params_file}" "USER" "www-data"
-    pool_params_set "${params_file}" "GROUP" "www-data"
-    pool_params_set "${params_file}" "LISTEN" "/var/run/php-fpm-${name}.sock"
-    pool_params_set "${params_file}" "LISTEN_OWNER" "www-data"
-    pool_params_set "${params_file}" "LISTEN_GROUP" "www-data"
-    pool_params_set "${params_file}" "PM" "dynamic"
-    pool_params_set "${params_file}" "PM_MAX_CHILDREN" "8"
-    pool_params_set "${params_file}" "PM_START_SERVERS" "2"
-    pool_params_set "${params_file}" "PM_MIN_SPARE_SERVERS" "1"
-    pool_params_set "${params_file}" "PM_MAX_SPARE_SERVERS" "3"
-    pool_params_set "${params_file}" "CATCH_WORKERS_OUTPUT" "yes"
-    pool_params_set "${params_file}" "CLEAR_ENV" "no"
-    pool_params_set "${params_file}" "ENABLE_METRICS" "false"
-    pool_params_set "${params_file}" "STATUS_PATH" ""
-    pool_params_set "${params_file}" "ENABLE_PING" "false"
-    pool_params_set "${params_file}" "PING_PATH" ""
-    pool_params_set "${params_file}" "PING_RESPONSE" ""
-
-    printf '%s\n' "${params_file}"
-}
-
-fpm_pool_render_content() {
-    name="$1"
-    template_file="$2"
-    params_file="$3"
-
-    render_template="$(mktemp_file)"
-    if [ -n "${template_file}" ]; then
-        [ -f "${template_file}" ] || die "Template not found: ${template_file}"
-        cat "${template_file}" > "${render_template}"
-    elif [ -n "${PHP_FPM_POOL_TEMPLATE}" ]; then
-        [ -f "${PHP_FPM_POOL_TEMPLATE}" ] || die "Template not found: ${PHP_FPM_POOL_TEMPLATE}"
-        cat "${PHP_FPM_POOL_TEMPLATE}" > "${render_template}"
-    else
-        fpm_default_pool_template > "${render_template}"
-    fi
-
-    PHPCTL_TEMPLATE_FILE="${render_template}" PHPCTL_PARAMS_FILE="${params_file}" "${PHP_BIN}" -r '
-        function loadParams(string $file): array {
-            $params = [];
-            foreach (@file($file, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
-                if ($line === "" || strpos($line, "#") === 0) {
-                    continue;
-                }
-                $parts = explode("=", $line, 2);
-                if (count($parts) === 2) {
-                    $params[$parts[0]] = $parts[1];
-                }
-            }
-            return $params;
-        }
-
-        function isTrueValue($value): bool {
-            $v = strtolower(trim((string) $value));
-            return in_array($v, ["1", "true", "yes", "on"], true);
-        }
-
-        function isEmptyValue($value): bool {
-            return trim((string) $value) === "";
-        }
-
-        function evalIfExpr(string $expr, array $params): bool {
-            $expr = trim($expr);
-
-            if (preg_match("/^empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
-                return isEmptyValue($params[$m[1]] ?? "");
-            }
-
-            if (preg_match("/^not\\s+empty\\s+([A-Z0-9_]+)$/i", $expr, $m)) {
-                return !isEmptyValue($params[$m[1]] ?? "");
-            }
-
-            if (preg_match("/^([A-Z0-9_]+)\\s*==\\s*(.+)$/i", $expr, $m)) {
-                $expected = trim($m[2]);
-                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
-                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
-                return (string) ($params[$m[1]] ?? "") === $expected;
-            }
-
-            if (preg_match("/^([A-Z0-9_]+)\\s*!=\\s*(.+)$/i", $expr, $m)) {
-                $expected = trim($m[2]);
-                $expected = preg_replace("/^\"(.*)\"$/", "$1", $expected);
-                $expected = preg_replace("/^\x27(.*)\x27$/", "$1", $expected);
-                return (string) ($params[$m[1]] ?? "") !== $expected;
-            }
-
-            if (preg_match("/^([A-Z0-9_]+)$/i", $expr, $m)) {
-                return isTrueValue($params[$m[1]] ?? "");
-            }
-
-            return false;
-        }
-
-        function renderVars(string $text, array $params): string {
-            return preg_replace_callback("/\\{\\{\\s*([A-Z0-9_]+)(?:\\s*\\|\\s*default\\((.*?)\\))?\\s*\\}\\}/i", function ($m) use ($params) {
-                $key = $m[1];
-                $value = $params[$key] ?? "";
-                if (isset($m[2])) {
-                    $default = trim($m[2]);
-                    $default = preg_replace("/^\"(.*)\"$/", "$1", $default);
-                    $default = preg_replace("/^\x27(.*)\x27$/", "$1", $default);
-                    if (trim((string) $value) === "") {
-                        $value = $default;
-                    }
-                }
-                return (string) $value;
-            }, $text);
-        }
-
-        function renderTemplate(string $template, array $params): string {
-            $lines = preg_split("/\\r?\\n/", $template);
-            $out = [];
-            $stack = [true];
-
-            foreach ($lines as $line) {
-                if (preg_match("/^\\s*\\{\\{\\s*if\\s+(.+?)\\s*\\}\\}\\s*$/", $line, $m)) {
-                    $parent = end($stack);
-                    $stack[] = $parent && evalIfExpr($m[1], $params);
-                    continue;
-                }
-
-                if (preg_match("/^\\s*\\{\\{\\s*endif\\s*\\}\\}\\s*$/", $line)) {
-                    if (count($stack) > 1) {
-                        array_pop($stack);
-                    }
-                    continue;
-                }
-
-                if (end($stack)) {
-                    $out[] = renderVars($line, $params);
-                }
-            }
-
-            return implode(PHP_EOL, $out) . PHP_EOL;
-        }
-
-        $template = file_get_contents(getenv("PHPCTL_TEMPLATE_FILE"));
-        $params = loadParams(getenv("PHPCTL_PARAMS_FILE"));
-        echo renderTemplate($template, $params);
-    '
-    rm -f "${render_template}"
-}
-
-fpm_pool_render_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm_pool_render
-usage=${PROG} fpm pool render <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_pool_create_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--enable]
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm_pool_create
-usage=${PROG} fpm pool create <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--enable]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_pool_generate_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--output-file <file>]
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm_pool_generate
-usage=${PROG} fpm pool generate <name> [--template <file>] [--params-file <file>] [-p KEY=VALUE ...] [--output-file <file>]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_pool_import_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm pool import <name> --from <file> [--enable]
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm_pool_import
-usage=${PROG} fpm pool import <name> --from <file> [--enable]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_pool_bundle_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm_pool_bundle
-usage=${PROG} fpm pool bundle import --json <string> | --json-file <file> [--reload]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_pool_render() {
-    [ $# -gt 0 ] || { fpm_pool_render_usage; return 0; }
-    name="$1"
-    shift
-
-    template_file=""
-    params_override_file=""
-    params_file="$(fpm_pool_build_params "${name}")"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --template)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
-                template_file="$1"
-                shift
-                ;;
-            --params-file)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
-                params_override_file="$1"
-                shift
-                ;;
-            -p|--param)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
-                key="${1%%=*}"
-                value="${1#*=}"
-                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
-                pool_params_set "${params_file}" "${key}" "${value}"
-                shift
-                ;;
-            -h|--help)
-                rm -f "${params_file}"
-                fpm_pool_render_usage
-                return 0
-                ;;
-            *)
-                rm -f "${params_file}"
-                die "Unknown pool render option: $1"
-                ;;
-        esac
-    done
-
-    if [ -n "${params_override_file}" ]; then
-        pool_params_load_file "${params_file}" "${params_override_file}"
-    fi
-
-    case "${OUTPUT_FORMAT}" in
-        text)
-            fpm_pool_render_content "${name}" "${template_file}" "${params_file}"
-            ;;
-        json|tsv)
-            rendered_file="$(mktemp_file)"
-            fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
-            emit_object <<EOF
-pool=${name}
-template=$( [ -n "${template_file}" ] && printf '%s' "${template_file}" || printf '%s' "${PHP_FPM_POOL_TEMPLATE:-builtin}" )
-content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
-EOF
-            rm -f "${rendered_file}"
-            ;;
-        *)
-            rm -f "${params_file}"
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-
-    rm -f "${params_file}"
-}
-
-fpm_pool_create() {
-    [ $# -gt 0 ] || { fpm_pool_create_usage; return 0; }
-    name="$1"
-    shift
-
-    template_file=""
-    params_override_file=""
-    params_file="$(fpm_pool_build_params "${name}")"
-    enable_after="no"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --template)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
-                template_file="$1"
-                shift
-                ;;
-            --params-file)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
-                params_override_file="$1"
-                shift
-                ;;
-            -p|--param)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
-                key="${1%%=*}"
-                value="${1#*=}"
-                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
-                pool_params_set "${params_file}" "${key}" "${value}"
-                shift
-                ;;
-            --enable)
-                enable_after="yes"
-                shift
-                ;;
-            -h|--help)
-                rm -f "${params_file}"
-                fpm_pool_create_usage
-                return 0
-                ;;
-            *)
-                rm -f "${params_file}"
-                die "Unknown pool create option: $1"
-                ;;
-        esac
-    done
-
-    if [ -n "${params_override_file}" ]; then
-        pool_params_load_file "${params_file}" "${params_override_file}"
-    fi
-
-    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
-    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
-    fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${target}"
-
-    if [ "${enable_after}" = "yes" ]; then
-        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
-        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
-    fi
-
-    rm -f "${params_file}"
-
-    emit_object <<EOF
-ok=yes
-action=create
-pool=${name}
-available=yes
-active=${enable_after}
-available_path=${target}
-active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
-EOF
-}
-
-fpm_pool_generate() {
-    [ $# -gt 0 ] || { fpm_pool_generate_usage; return 0; }
-    name="$1"
-    shift
-
-    template_file=""
-    params_override_file=""
-    params_file="$(fpm_pool_build_params "${name}")"
-    output_file=""
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --template)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --template"; }
-                template_file="$1"
-                shift
-                ;;
-            --params-file)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --params-file"; }
-                params_override_file="$1"
-                shift
-                ;;
-            --output-file)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --output-file"; }
-                output_file="$1"
-                shift
-                ;;
-            -p|--param)
-                shift
-                [ $# -gt 0 ] || { rm -f "${params_file}"; die "Missing value for --param"; }
-                key="${1%%=*}"
-                value="${1#*=}"
-                [ "${key}" != "${1}" ] || { rm -f "${params_file}"; die "Invalid param format: $1"; }
-                pool_params_set "${params_file}" "${key}" "${value}"
-                shift
-                ;;
-            -h|--help)
-                rm -f "${params_file}"
-                fpm_pool_generate_usage
-                return 0
-                ;;
-            *)
-                rm -f "${params_file}"
-                die "Unknown pool generate option: $1"
-                ;;
-        esac
-    done
-
-    if [ -n "${params_override_file}" ]; then
-        pool_params_load_file "${params_file}" "${params_override_file}"
-    fi
-
-    if [ -n "${output_file}" ]; then
-        fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${output_file}"
-        emit_object <<EOF
-ok=yes
-action=generate
-pool=${name}
-output_file=${output_file}
-EOF
-    else
-        case "${OUTPUT_FORMAT}" in
-            text)
-                fpm_pool_render_content "${name}" "${template_file}" "${params_file}"
-                ;;
-            json|tsv)
-                rendered_file="$(mktemp_file)"
-                fpm_pool_render_content "${name}" "${template_file}" "${params_file}" > "${rendered_file}"
-                emit_object <<EOF
-ok=yes
-action=generate
-pool=${name}
-content=$(tr '\n' ' ' < "${rendered_file}" | sed 's/[[:space:]]\+/ /g')
-EOF
-                rm -f "${rendered_file}"
-                ;;
-            *)
-                rm -f "${params_file}"
-                die "Unsupported output format: ${OUTPUT_FORMAT}"
-                ;;
-        esac
-    fi
-
-    rm -f "${params_file}"
-}
-
-fpm_pool_import() {
-    [ $# -gt 0 ] || { fpm_pool_import_usage; return 0; }
-    name="$1"
-    shift
-
-    src=""
-    enable_after="no"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --from)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --from"
-                src="$1"
-                shift
-                ;;
-            --enable)
-                enable_after="yes"
-                shift
-                ;;
-            -h|--help)
-                fpm_pool_import_usage
-                return 0
-                ;;
-            *)
-                die "Unknown pool import option: $1"
-                ;;
-        esac
-    done
-
-    [ -n "${src}" ] || die "Missing required option --from"
-    [ -f "${src}" ] || die "Pool source file not found: ${src}"
-
-    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}"
-    target="${PHP_FPM_POOL_AVAILABLE_DIR}/${name}.conf"
-    cp "${src}" "${target}"
-
-    if [ "${enable_after}" = "yes" ]; then
-        mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
-        ln -sf "${target}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")"
-    fi
-
-    emit_object <<EOF
-ok=yes
-action=import
-pool=${name}
-available=yes
-active=${enable_after}
-available_path=${target}
-active_path=$( [ "${enable_after}" = "yes" ] && printf '%s' "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${target}")" || printf '%s' "-" )
-EOF
-}
-
-# Import multiple pools from JSON without requiring a mounted volume.
-fpm_pool_bundle_import() {
-    json_string=""
-    json_file=""
-    do_reload="no"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --json)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --json"
-                json_string="$1"
-                shift
-                ;;
-            --json-file)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --json-file"
-                json_file="$1"
-                shift
-                ;;
-            --reload)
-                do_reload="yes"
-                shift
-                ;;
-            -h|--help)
-                fpm_pool_bundle_usage
-                return 0
-                ;;
-            *)
-                die "Unknown pool bundle import option: $1"
-                ;;
-        esac
-    done
-
-    [ -n "${json_string}" ] || [ -n "${json_file}" ] || die "One of --json or --json-file is required"
-    [ -z "${json_string}" ] || [ -z "${json_file}" ] || die "Use only one of --json or --json-file"
-
-    input_file="$(mktemp_file)"
-    result_file="$(mktemp_file)"
-
-    if [ -n "${json_file}" ]; then
-        [ -f "${json_file}" ] || { rm -f "${input_file}" "${result_file}"; die "JSON file not found: ${json_file}"; }
-        cp "${json_file}" "${input_file}"
-    else
-        printf '%s\n' "${json_string}" > "${input_file}"
-    fi
-
-    mkdir -p "${PHP_FPM_POOL_AVAILABLE_DIR}" "${PHP_FPM_POOL_ACTIVE_DIR}"
-
-    PHPCTL_JSON_FILE="${input_file}" \
-    PHPCTL_RESULT_FILE="${result_file}" \
-    PHPCTL_SELF_PATH="${SELF_PATH}" \
-    "${PHP_BIN}" -r '
-        function fail(string $message): void {
-            fwrite(STDERR, $message . PHP_EOL);
-            exit(1);
-        }
-
-        function writeParamsFile(array $params): string {
-            $file = tempnam(sys_get_temp_dir(), "phpctl_pool_params_");
-            if ($file === false) {
-                fail("Unable to create params file");
-            }
-            $lines = [];
-            foreach ($params as $k => $v) {
-                $lines[] = $k . "=" . (string) $v;
-            }
-            file_put_contents($file, implode(PHP_EOL, $lines) . PHP_EOL);
-            return $file;
-        }
-
-        $json = file_get_contents(getenv("PHPCTL_JSON_FILE"));
-        if ($json === false || trim($json) === "") {
-            fail("Empty JSON bundle");
-        }
-
-        $data = json_decode($json, true);
-        if (!is_array($data)) {
-            fail("Invalid JSON bundle");
-        }
-
-        $defaultEnabled = isset($data["enabled"]) ? (bool) $data["enabled"] : true;
-        $pools = $data["pools"] ?? null;
-        if (!is_array($pools)) {
-            fail("Bundle must contain pools array");
-        }
-
-        $result = [];
-
-        foreach ($pools as $pool) {
-            if (!is_array($pool)) {
-                fail("Invalid pool entry");
-            }
-
-            $name = (string) ($pool["name"] ?? "");
-            if ($name === "") {
-                fail("Pool name is required");
-            }
-
-            $template = (string) ($pool["template"] ?? "");
-            $enabled = array_key_exists("enabled", $pool) ? (bool) $pool["enabled"] : $defaultEnabled;
-            $params = $pool["params"] ?? [];
-            if (!is_array($params)) {
-                fail("Pool params must be an object");
-            }
-
-            $renderParams = [
-                "POOL_NAME" => $name,
-                "USER" => "www-data",
-                "GROUP" => "www-data",
-                "LISTEN" => "/var/run/php-fpm-" . $name . ".sock",
-                "LISTEN_OWNER" => "www-data",
-                "LISTEN_GROUP" => "www-data",
-                "PM" => "dynamic",
-                "PM_MAX_CHILDREN" => "8",
-                "PM_START_SERVERS" => "2",
-                "PM_MIN_SPARE_SERVERS" => "1",
-                "PM_MAX_SPARE_SERVERS" => "3",
-                "CATCH_WORKERS_OUTPUT" => "yes",
-                "CLEAR_ENV" => "no",
-                "ENABLE_METRICS" => "false",
-                "STATUS_PATH" => "",
-                "ENABLE_PING" => "false",
-                "PING_PATH" => "",
-                "PING_RESPONSE" => "",
-            ];
-
-            foreach ($params as $k => $v) {
-                $renderParams[(string) $k] = is_scalar($v) || $v === null ? (string) $v : json_encode($v);
-            }
-
-            $paramsFile = writeParamsFile($renderParams);
-            $cmd = [getenv("PHPCTL_SELF_PATH"), "fpm", "pool", "create", $name, "--params-file", $paramsFile];
-            if ($template !== "") {
-                $cmd[] = "--template";
-                $cmd[] = $template;
-            }
-            if ($enabled) {
-                $cmd[] = "--enable";
-            }
-
-            $descriptors = [
-                0 => ["pipe", "r"],
-                1 => ["pipe", "w"],
-                2 => ["pipe", "w"],
-            ];
-            $proc = proc_open($cmd, $descriptors, $pipes);
-            if (!is_resource($proc)) {
-                @unlink($paramsFile);
-                fail("Unable to execute phpctl for pool " . $name);
-            }
-
-            fclose($pipes[0]);
-            $stdout = stream_get_contents($pipes[1]);
-            $stderr = stream_get_contents($pipes[2]);
-            fclose($pipes[1]);
-            fclose($pipes[2]);
-            $exitCode = proc_close($proc);
-            @unlink($paramsFile);
-
-            if ($exitCode !== 0) {
-                fail("Pool " . $name . " failed: " . trim((string) $stderr));
-            }
-
-            $result[] = [
-                "name" => $name,
-                "enabled" => $enabled,
-                "stdout" => trim((string) $stdout),
-            ];
-        }
-
-        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    '
-
-    if [ "${do_reload}" = "yes" ]; then
-        fpm_reload >/dev/null 2>&1 || true
-    fi
-
-    case "${OUTPUT_FORMAT}" in
-        text)
-            printf 'ok: yes\n'
-            printf 'action: bundle-import\n'
-            printf 'reload: %s\n' "${do_reload}"
-            printf 'result: %s\n' "$(cat "${result_file}")"
-            ;;
-        json|tsv)
-            emit_object <<EOF
-ok=yes
-action=bundle-import
-reload=${do_reload}
-result=$(cat "${result_file}")
-EOF
-            ;;
-        *)
-            rm -f "${input_file}" "${result_file}"
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-
-    rm -f "${input_file}" "${result_file}"
-}
-
-fpm_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} fpm <subcommand> [args]
-
-Subcommands:
-  status               Show php-fpm binary and config test result
-  test                 Run php-fpm -t
-  configtest           Alias of test
-  reload               Reload php-fpm master process
-  pool list            List available and active pools
-  pool render <name>   Render pool file content
-  pool create <name>   Create pool config in the available dir
-  pool generate <name> Generate pool config for manual editing
-  pool import <name>   Import existing pool config file
-  pool bundle import   Import multiple pools from JSON
-  pool enable <name>   Enable pool config by linking it into active dir
-  pool disable <name>  Disable pool config by removing it from active dir
-  pool delete <name>   Delete pool config
-  pool validate <name> Validate pool config by running php-fpm -t
-  pool show <name>     Show pool file paths
-  help                 Show this help
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=fpm
-usage=${PROG} fpm <subcommand> [args]
-subcommands=status,test,configtest,reload,pool list,pool render,pool create,pool generate,pool import,pool bundle import,pool enable,pool disable,pool delete,pool validate,pool show,help
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-fpm_status() {
-    bin_path="$(command -v "${PHP_FPM_BIN}" 2>/dev/null || printf '%s\n' "not-found")"
-    available="no"
-    config_ok="no"
-
-    if cmd_exists "${PHP_FPM_BIN}"; then
-        available="yes"
-        if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
-            config_ok="yes"
-        fi
-    fi
-
-    emit_object <<EOF
-php_fpm_bin=${bin_path}
-available=${available}
-config_ok=${config_ok}
-master_pid=$(php_fpm_master_pid 2>/dev/null || printf '%s' -)
-EOF
-}
-
-fpm_test() {
-    if ! cmd_exists "${PHP_FPM_BIN}"; then
-        die "php-fpm binary not found"
-    fi
-
-    if "${PHP_FPM_BIN}" -t >/dev/null 2>&1; then
-        status="ok"
-        ok="yes"
-        details="configuration valid"
-    else
-        status="fail"
-        ok="no"
-        details="configuration invalid"
-    fi
-
-    emit_object <<EOF
-ok=${ok}
-status=${status}
-details=${details}
-EOF
-}
-
-fpm_reload() {
-    cmd_exists "${PHP_FPM_BIN}" || die "php-fpm binary not found"
-    "${PHP_FPM_BIN}" -t >/dev/null 2>&1 || die "php-fpm configuration invalid"
-
-    pid="$(php_fpm_master_pid 2>/dev/null || true)"
-    [ -n "${pid}" ] || die "php-fpm master process not found"
-
-    kill -s "${PHP_FPM_RELOAD_SIGNAL}" "${pid}" >/dev/null 2>&1 || die "Unable to send reload signal"
-
-    emit_object <<EOF
-ok=yes
-status=ok
-signal=${PHP_FPM_RELOAD_SIGNAL}
-pid=${pid}
-details=reloaded
-EOF
-}
-
-fpm_pool_list() {
-    tmp_names="$(mktemp_file)"
-    tmp_rows="$(mktemp_file)"
-    : > "${tmp_names}"
-
-    if [ -d "${PHP_FPM_POOL_AVAILABLE_DIR}" ]; then
-        for f in "${PHP_FPM_POOL_AVAILABLE_DIR}"/*; do
-            [ -e "${f}" ] || continue
-            pool_name_from_path "${f}" >> "${tmp_names}"
-        done
-    fi
-
-    if [ -d "${PHP_FPM_POOL_ACTIVE_DIR}" ]; then
-        for f in "${PHP_FPM_POOL_ACTIVE_DIR}"/*; do
-            [ -e "${f}" ] || continue
-            case "$(basename "${f}")" in
-                *.conf|*.pool.conf) pool_name_from_path "${f}" >> "${tmp_names}" ;;
-            esac
-        done
-    fi
-
-    printf 'name\tavailable\tactive\tavailable_path\tactive_path\n' > "${tmp_rows}"
-
-    if [ -s "${tmp_names}" ]; then
-        sort -fu "${tmp_names}" | while IFS= read -r name; do
-            [ -n "${name}" ] || continue
-            avail="no"
-            active="no"
-            available_path="-"
-            active_path="-"
-
-            if resolve_pool_available "${name}" >/dev/null 2>&1; then
-                avail="yes"
-                available_path="$(resolve_pool_available "${name}")"
-            fi
-
-            if resolve_pool_active "${name}" >/dev/null 2>&1; then
-                active="yes"
-                active_path="$(resolve_pool_active "${name}")"
-            fi
-
-            printf '%s\t%s\t%s\t%s\t%s\n' "${name}" "${avail}" "${active}" "${available_path}" "${active_path}"
-        done >> "${tmp_rows}"
-    fi
-
-    render_table_file "${tmp_rows}"
-    rm -f "${tmp_names}" "${tmp_rows}"
-}
-
-fpm_pool_enable() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool enable <name>"
-    name="$1"
-    src="$(resolve_pool_available "${name}" 2>/dev/null || true)"
-    [ -n "${src}" ] || die "Pool not found in available dir: ${name}"
-
-    mkdir -p "${PHP_FPM_POOL_ACTIVE_DIR}"
-    ln -sf "${src}" "${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")"
-
-    emit_object <<EOF
-ok=yes
-action=enable
-pool=${name}
-active=yes
-active_path=${PHP_FPM_POOL_ACTIVE_DIR}/$(basename "${src}")
-EOF
-}
-
-fpm_pool_disable() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool disable <name>"
-    name="$1"
-    dst="$(resolve_pool_active "${name}" 2>/dev/null || true)"
-    [ -n "${dst}" ] || die "Pool not active: ${name}"
-
-    rm -f "${dst}"
-
-    emit_object <<EOF
-ok=yes
-action=disable
-pool=${name}
-active=no
-removed_path=${dst}
-EOF
-}
-
-fpm_pool_delete() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool delete <name>"
-    name="$1"
-
-    active_path="$(resolve_pool_active "${name}" 2>/dev/null || true)"
-    available_path="$(resolve_pool_available "${name}" 2>/dev/null || true)"
-
-    [ -n "${active_path}" ] && rm -f "${active_path}"
-    [ -n "${available_path}" ] && rm -f "${available_path}"
-
-    emit_object <<EOF
-ok=yes
-action=delete
-pool=${name}
-removed=yes
-EOF
-}
-
-fpm_pool_validate() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool validate <name>"
-    name="$1"
-    resolve_pool_available "${name}" >/dev/null 2>&1 || die "Pool not found in available dir: ${name}"
-    fpm_test
-}
-
-fpm_pool_show() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} fpm pool show <name>"
-    name="$1"
-
-    avail="no"
-    active="no"
-    available_path="-"
-    active_path="-"
-
-    if resolve_pool_available "${name}" >/dev/null 2>&1; then
-        avail="yes"
-        available_path="$(resolve_pool_available "${name}")"
-    fi
-
-    if resolve_pool_active "${name}" >/dev/null 2>&1; then
-        active="yes"
-        active_path="$(resolve_pool_active "${name}")"
-    fi
-
-    emit_object <<EOF
-pool=${name}
-available=${avail}
-active=${active}
-available_path=${available_path}
-active_path=${active_path}
-EOF
-}
-
-handle_fpm() {
-    [ $# -gt 0 ] || { fpm_usage; return 0; }
-
-    case "$1" in
-        help|--help|-h)
-            fpm_usage
-            ;;
-        status)
-            shift
-            fpm_status "$@"
-            ;;
-        test)
-            shift
-            fpm_test "$@"
-            ;;
-        configtest)
-            shift
-            fpm_test "$@"
-            ;;
-        reload)
-            shift
-            fpm_reload "$@"
-            ;;
-        pool)
-            shift
-            [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool <list|render|create|generate|import|bundle|enable|disable|delete|validate|show> ..."
-            case "$1" in
-                help|--help|-h)
-                    fpm_usage
-                    ;;
-                list)
-                    shift
-                    fpm_pool_list "$@"
-                    ;;
-                render)
-                    shift
-                    fpm_pool_render "$@"
-                    ;;
-                create)
-                    shift
-                    fpm_pool_create "$@"
-                    ;;
-                generate)
-                    shift
-                    fpm_pool_generate "$@"
-                    ;;
-                import)
-                    shift
-                    fpm_pool_import "$@"
-                    ;;
-                bundle)
-                    shift
-                    [ $# -gt 0 ] || die "Usage: ${PROG} fpm pool bundle import ..."
-                    case "$1" in
-                        import)
-                            shift
-                            fpm_pool_bundle_import "$@"
-                            ;;
-                        *)
-                            die "Unknown fpm pool bundle subcommand: $1"
-                            ;;
-                    esac
-                    ;;
-                enable)
-                    shift
-                    fpm_pool_enable "$@"
-                    ;;
-                disable)
-                    shift
-                    fpm_pool_disable "$@"
-                    ;;
-                delete)
-                    shift
-                    fpm_pool_delete "$@"
-                    ;;
-                validate)
-                    shift
-                    fpm_pool_validate "$@"
-                    ;;
-                show)
-                    shift
-                    fpm_pool_show "$@"
-                    ;;
-                *)
-                    die "Unknown fpm pool subcommand: $1"
-                    ;;
-            esac
-            ;;
-        *)
-            die "Unknown fpm subcommand: $1"
-            ;;
-    esac
-}
-
-ini_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} ini <subcommand> [args]
-
-Subcommands:
-  show                 Show php ini information
-  get <key>            Read a single ini value
-  scan                 Show additional ini scan directory
-  loaded               Show loaded php.ini path
-  help                 Show this help
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=ini
-usage=${PROG} ini <subcommand> [args]
-subcommands=show,get,scan,loaded,help
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-ini_show() {
-    if [ "${OUTPUT_FORMAT}" = "text" ]; then
-        "${PHP_BIN}" --ini
-        return 0
-    fi
-
-    loaded_ini="$(php_loaded_ini)"
-    scan_dir="$(php_ini_scan_dir)"
-    parsed_files="$(php_parsed_ini_files | paste -sd ',' -)"
-    parsed_count="$(php_parsed_ini_files | awk 'NF { c++ } END { print c+0 }')"
-
-    emit_object <<EOF
-loaded_ini=${loaded_ini}
-scan_dir=${scan_dir}
-parsed_files_count=${parsed_count}
-parsed_files=${parsed_files}
-EOF
-}
-
-ini_get() {
-    [ $# -eq 1 ] || die "Usage: ${PROG} ini get <key>"
-    key="$1"
-    value="$("${PHP_BIN}" -r 'echo ini_get($argv[1]), PHP_EOL;' "${key}" 2>/dev/null || true)"
-
-    emit_object <<EOF
-key=${key}
-value=${value}
-EOF
-}
-
-ini_scan() {
-    emit_object <<EOF
-scan_dir=$(php_ini_scan_dir)
-EOF
-}
-
-ini_loaded() {
-    emit_object <<EOF
-loaded_ini=$(php_loaded_ini)
-EOF
-}
-
-handle_ini() {
-    [ $# -gt 0 ] || { ini_usage; return 0; }
-
-    case "$1" in
-        help|--help|-h)
-            ini_usage
-            ;;
-        show)
-            shift
-            ini_show "$@"
-            ;;
-        get)
-            shift
-            ini_get "$@"
-            ;;
-        scan)
-            shift
-            ini_scan "$@"
-            ;;
-        loaded)
-            shift
-            ini_loaded "$@"
-            ;;
-        *)
-            die "Unknown ini subcommand: $1"
-            ;;
-    esac
-}
-
-status_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} status
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=status
-usage=${PROG} status
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-health_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} health
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=health
-usage=${PROG} health
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-metrics_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} metrics
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=metrics
-usage=${PROG} metrics
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-serve_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} serve [--listen <socket|host:port>]
-
-Serve /healthz, /readyz, /status and /metrics over HTTP.
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=serve
-usage=${PROG} serve [--listen <socket|host:port>]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-client_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
-
-Client configuration file:
-  ${PHPCTL_CLIENT_CONF}
-
-Config format:
-  host=
-  user=
-  password=
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=client
-usage=${PROG} client [--host <socket|host:port>] [--credentials <user:password>] <command> [args...]
-client_conf=${PHPCTL_CLIENT_CONF}
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-server_usage() {
-    case "${OUTPUT_FORMAT}" in
-        text)
-            cat <<EOF
-Usage:
-  ${PROG} server [--listen <socket|host:port>]
-
-Serve /healthz, /readyz, /status, /metrics and POST /run over HTTP.
-
-Notes:
-  - The built-in server does not enforce Basic Auth.
-  - Basic Auth can be added externally, for example with nginx.
-EOF
-            ;;
-        json|tsv)
-            emit_object <<EOF
-section=server
-usage=${PROG} server [--listen <socket|host:port>]
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-}
-
-phpctl_is_unix_socket_endpoint() {
-    case "$1" in
-        /*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-nc_supports_unix_sockets() {
-    "${NC_BIN}" 2>&1 | grep -q -- '-U'
-}
-
-nc_supports_exec() {
-    "${NC_BIN}" 2>&1 | grep -q -- '-e '
-}
-
-phpctl_validate_endpoint() {
-    endpoint="$1"
-
-    if phpctl_is_unix_socket_endpoint "${endpoint}"; then
-        return 0
-    fi
-
-    case "${endpoint}" in
-        *:*)
-            host_part="${endpoint%:*}"
-            port_part="${endpoint##*:}"
-            [ -n "${host_part}" ] || return 1
-            [ -n "${port_part}" ] || return 1
-            case "${port_part}" in
-                *[!0-9]*|'')
-                    return 1
-                    ;;
-            esac
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
-http_extract_body() {
-    src="$1"
-    dst="$2"
-    awk '
-        BEGIN { body=0 }
-        {
-            line=$0
-            sub(/\r$/, "", line)
-            if (body) {
-                print line
-            } else if (line == "") {
-                body=1
-            }
-        }
-    ' "${src}" > "${dst}"
-}
-
-http_read_request_meta() {
-    src="$1"
-    meta="$2"
-    awk '
-        BEGIN {
-            method=""
-            path=""
-            content_length="0"
-            headers_done=0
-        }
-        NR == 1 {
-            line=$0
-            sub(/\r$/, "", line)
-            split(line, p, " ")
-            method=p[1]
-            path=p[2]
-            next
-        }
-        {
-            line=$0
-            sub(/\r$/, "", line)
-            if (headers_done == 1) {
-                next
-            }
-            if (line == "") {
-                headers_done=1
-                next
-            }
-            lower=line
-            gsub(/[A-Z]/, "", "") # no-op for POSIX compatibility
-            if (line ~ /^[Cc]ontent-[Ll]ength:[[:space:]]*/) {
-                sub(/^[^:]*:[[:space:]]*/, "", line)
-                gsub(/[[:space:]]/, "", line)
-                content_length=line
-            }
-        }
-        END {
-            print "method=" method
-            print "path=" path
-            print "content_length=" content_length
-        }
-    ' "${src}" > "${meta}"
-}
-
-# Read client config from file when host or credentials are not passed explicitly.
-phpctl_client_load_config() {
-    conf_file="$1"
-    conf_host=""
-    conf_user=""
-    conf_password=""
-
-    [ -f "${conf_file}" ] || return 0
-
-    while IFS= read -r line; do
-        [ -n "${line}" ] || continue
-        case "${line}" in
-            \#*) continue ;;
-        esac
-        key="${line%%=*}"
-        value="${line#*=}"
-        case "${key}" in
-            host) conf_host="${value}" ;;
-            user) conf_user="${value}" ;;
-            password|pasword) conf_password="${value}" ;;
-        esac
-    done < "${conf_file}"
-
-    [ -n "${PHPCTL_REMOTE_HOST}" ] || PHPCTL_REMOTE_HOST="${conf_host}"
-    if [ -z "${PHPCTL_REMOTE_CREDENTIALS}" ] && [ -n "${conf_user}" ] && [ -n "${conf_password}" ]; then
-        PHPCTL_REMOTE_CREDENTIALS="${conf_user}:${conf_password}"
-    fi
-}
-
-# Build JSON payload for the remote API from argv and requested output format.
-phpctl_client_build_payload() {
-    args_file="$(mktemp_file)"
-    payload_file="$(mktemp_file)"
-    : > "${args_file}"
-
-    for arg in "$@"; do
-        printf '%s\n' "${arg}" >> "${args_file}"
-    done
-
-    PHPCTL_ARGS_FILE="${args_file}" PHPCTL_PAYLOAD_FILE="${payload_file}" PHPCTL_OUTPUT_VALUE="${OUTPUT_FORMAT}" "${PHP_BIN}" -r '
-        $args = file(getenv("PHPCTL_ARGS_FILE"), FILE_IGNORE_NEW_LINES) ?: [];
-        $payload = [
-            "argv" => array_values($args),
-            "output" => getenv("PHPCTL_OUTPUT_VALUE") ?: "text",
-        ];
-        file_put_contents(getenv("PHPCTL_PAYLOAD_FILE"), json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    '
-
-    rm -f "${args_file}"
-    printf '%s\n' "${payload_file}"
-}
-
-# Send one HTTP request using TCP or Unix socket.
-phpctl_client_send_http() {
-    host="$1"
-    auth="$2"
-    payload_file="$3"
-
-    response_file="$(mktemp_file)"
-    request_file="$(mktemp_file)"
-    payload_len="$(wc -c < "${payload_file}" | tr -d '[:space:]')"
-    auth_header=""
-
-    if [ -n "${auth}" ]; then
-        auth_value="$("${PHP_BIN}" -r 'echo base64_encode($argv[1]);' "${auth}")"
-        auth_header="Authorization: Basic ${auth_value}\r\n"
-    fi
-
-    {
-        printf 'POST /run HTTP/1.1\r\n'
-        printf 'Host: phpctl\r\n'
-        printf 'Content-Type: application/json\r\n'
-        printf 'Content-Length: %s\r\n' "${payload_len}"
-        printf '%b' "${auth_header}"
-        printf 'Connection: close\r\n'
-        printf '\r\n'
-        cat "${payload_file}"
-    } > "${request_file}"
-
-    case "${host}" in
-        /*)
-            nc_supports_unix_sockets || {
-                rm -f "${request_file}" "${response_file}"
-                die "Current nc implementation does not support Unix sockets (-U missing)"
-            }
-            "${NC_BIN}" -U "${host}" < "${request_file}" > "${response_file}" 2>/dev/null || {
-                rm -f "${request_file}" "${response_file}"
-                die "Unable to connect to socket: ${host}"
-            }
-            ;;
-        *)
-            tcp_host="${host%:*}"
-            tcp_port="${host##*:}"
-            [ -n "${tcp_host}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
-            [ -n "${tcp_port}" ] || { rm -f "${request_file}" "${response_file}"; die "Invalid remote host: ${host}"; }
-            "${NC_BIN}" "${tcp_host}" "${tcp_port}" < "${request_file}" > "${response_file}" 2>/dev/null || {
-                rm -f "${request_file}" "${response_file}"
-                die "Unable to connect to host: ${host}"
-            }
-            ;;
-    esac
-
-    rm -f "${request_file}"
-    printf '%s\n' "${response_file}"
-}
-
-# Parse JSON response body and print remote stdout/stderr locally.
-phpctl_client_consume_response() {
-    response_file="$1"
-    body_file="$(mktemp_file)"
-
-    http_extract_body "${response_file}" "${body_file}"
-
-    PHPCTL_BODY_FILE="${body_file}" "${PHP_BIN}" -r '
-        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
-        if ($body === false || trim($body) === "") {
-            fwrite(STDERR, "Empty response body\n");
-            exit(1);
-        }
-
-        $json = json_decode($body, true);
-        if (!is_array($json)) {
-            fwrite(STDERR, $body);
-            exit(1);
-        }
-
-        $stdout = (string) ($json["stdout"] ?? "");
-        $stderr = (string) ($json["stderr"] ?? "");
-        $exitCode = (int) ($json["exit_code"] ?? 1);
-
-        if ($stdout !== "") {
-            fwrite(STDOUT, $stdout);
-            if (substr($stdout, -1) !== "\n") {
-                fwrite(STDOUT, "\n");
-            }
-        }
-
-        if ($stderr !== "") {
-            fwrite(STDERR, $stderr);
-            if (substr($stderr, -1) !== "\n") {
-                fwrite(STDERR, "\n");
-            }
-        }
-
-        exit($exitCode);
-    '
-    rc=$?
-    rm -f "${body_file}"
-    return "${rc}"
-}
-
-phpctl_client_run() {
-    host=""
-    credentials=""
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --host)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --host"
-                host="$1"
-                shift
-                ;;
-            --credentials)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --credentials"
-                credentials="$1"
-                shift
-                ;;
-            -h|--help)
-                client_usage
-                return 0
-                ;;
-            *)
-                break
-                ;;
-        esac
-    done
-
-    [ $# -gt 0 ] || die "Client requires a remote command"
-
-    PHPCTL_REMOTE_HOST="${host}"
-    PHPCTL_REMOTE_CREDENTIALS="${credentials}"
-    phpctl_client_load_config "${PHPCTL_CLIENT_CONF}"
-
-    [ -n "${PHPCTL_REMOTE_HOST}" ] || die "Remote host is not configured"
-    phpctl_validate_endpoint "${PHPCTL_REMOTE_HOST}" || die "Invalid remote host: ${PHPCTL_REMOTE_HOST}"
-
-    payload_file="$(phpctl_client_build_payload "$@")"
-    response_file="$(phpctl_client_send_http "${PHPCTL_REMOTE_HOST}" "${PHPCTL_REMOTE_CREDENTIALS}" "${payload_file}")"
-    rm -f "${payload_file}"
-
-    phpctl_client_consume_response "${response_file}"
-    rc=$?
-    rm -f "${response_file}"
-    return "${rc}"
-}
-
-# Execute a JSON payload by spawning the same phpctl binary locally.
-phpctl_server_run_payload() {
-    body_file="$1"
-    result_file="$2"
-
-    PHPCTL_BODY_FILE="${body_file}" PHPCTL_RESULT_FILE="${result_file}" PHPCTL_SELF_PATH="${SELF_PATH}" "${PHP_BIN}" -r '
-        $body = file_get_contents(getenv("PHPCTL_BODY_FILE"));
-        $data = json_decode((string) $body, true);
-
-        if (!is_array($data)) {
-            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
-                "ok" => false,
-                "exit_code" => 1,
-                "stdout" => "",
-                "stderr" => "Invalid JSON payload",
-            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-            exit(0);
-        }
-
-        $argv = $data["argv"] ?? [];
-        if (!is_array($argv)) {
-            $argv = [];
-        }
-
-        $output = (string) ($data["output"] ?? "text");
-
-        $cmd = [getenv("PHPCTL_SELF_PATH"), "--output", $output];
-        foreach ($argv as $arg) {
-            $cmd[] = (string) $arg;
-        }
-
-        $descriptors = [
-            0 => ["pipe", "r"],
-            1 => ["pipe", "w"],
-            2 => ["pipe", "w"],
-        ];
-
-        $proc = proc_open($cmd, $descriptors, $pipes);
-        if (!is_resource($proc)) {
-            file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
-                "ok" => false,
-                "exit_code" => 1,
-                "stdout" => "",
-                "stderr" => "Unable to spawn phpctl command",
-            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-            exit(0);
-        }
-
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($proc);
-
-        file_put_contents(getenv("PHPCTL_RESULT_FILE"), json_encode([
-            "ok" => $exitCode === 0,
-            "exit_code" => $exitCode,
-            "stdout" => (string) $stdout,
-            "stderr" => (string) $stderr,
-        ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
-    '
-}
-
-phpctl_server_http_response() {
-    status_line="$1"
-    content_type="$2"
-    body_file="$3"
-
-    body_len="$(wc -c < "${body_file}" | tr -d '[:space:]')"
-    printf 'HTTP/1.1 %s\r\n' "${status_line}"
-    printf 'Content-Type: %s\r\n' "${content_type}"
-    printf 'Content-Length: %s\r\n' "${body_len}"
-    printf 'Connection: close\r\n'
-    printf '\r\n'
-    cat "${body_file}"
-}
-
-# Handle one read-only HTTP connection on stdin/stdout.
-phpctl_serve_handle_connection() {
-    req_file="$(mktemp_file)"
-    response_body="$(mktemp_file)"
-    meta_file="$(mktemp_file)"
-    status_line="404 Not Found"
-    content_type="application/json"
-
-    cat > "${req_file}"
-    http_read_request_meta "${req_file}" "${meta_file}"
-
-    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
-    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
-
-    case "${method}:${path}" in
-        GET:/healthz|GET:/readyz)
-            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
-                status_line="200 OK"
-            else
-                printf '{"ok":false}\n' > "${response_body}"
-                status_line="503 Service Unavailable"
-            fi
-            ;;
-        GET:/status)
-            "${SELF_PATH}" --output json status > "${response_body}"
-            status_line="200 OK"
-            ;;
-        GET:/metrics)
-            "${SELF_PATH}" --output text metrics > "${response_body}"
-            status_line="200 OK"
-            content_type="text/plain; version=0.0.4"
-            ;;
-        *)
-            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
-            status_line="404 Not Found"
-            ;;
-    esac
-
-    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
-
-    rm -f "${req_file}" "${response_body}" "${meta_file}"
-}
-
-# Handle one full HTTP connection on stdin/stdout, including POST /run.
-phpctl_server_handle_connection() {
-    req_file="$(mktemp_file)"
-    body_file="$(mktemp_file)"
-    response_body="$(mktemp_file)"
-    result_file="$(mktemp_file)"
-    meta_file="$(mktemp_file)"
-    status_line="404 Not Found"
-    content_type="application/json"
-
-    cat > "${req_file}"
-    http_read_request_meta "${req_file}" "${meta_file}"
-    http_extract_body "${req_file}" "${body_file}"
-
-    method="$(sed -n 's/^method=//p' "${meta_file}" | head -n1)"
-    path="$(sed -n 's/^path=//p' "${meta_file}" | head -n1)"
-    content_length="$(sed -n 's/^content_length=//p' "${meta_file}" | head -n1)"
-    [ -n "${content_length}" ] || content_length="0"
-
-    case "${method}:${path}" in
-        GET:/healthz|GET:/readyz)
-            if "${SELF_PATH}" --output json health > "${response_body}" 2>/dev/null; then
-                status_line="200 OK"
-            else
-                printf '{"ok":false}\n' > "${response_body}"
-                status_line="503 Service Unavailable"
-            fi
-            ;;
-        GET:/status)
-            "${SELF_PATH}" --output json status > "${response_body}"
-            status_line="200 OK"
-            ;;
-        GET:/metrics)
-            "${SELF_PATH}" --output text metrics > "${response_body}"
-            status_line="200 OK"
-            content_type="text/plain; version=0.0.4"
-            ;;
-        POST:/run)
-            if [ "${content_length}" -gt 0 ] 2>/dev/null; then
-                phpctl_server_run_payload "${body_file}" "${result_file}"
-                cat "${result_file}" > "${response_body}"
-                status_line="200 OK"
-            else
-                printf '{"ok":false,"exit_code":1,"stdout":"","stderr":"Empty request body"}\n' > "${response_body}"
-                status_line="400 Bad Request"
-            fi
-            ;;
-        *)
-            printf '{"ok":false,"error":"not found"}\n' > "${response_body}"
-            status_line="404 Not Found"
-            ;;
-    esac
-
-    phpctl_server_http_response "${status_line}" "${content_type}" "${response_body}"
-
-    rm -f "${req_file}" "${body_file}" "${response_body}" "${result_file}" "${meta_file}"
-}
-
-phpctl_stdio_entrypoint_usage() {
-    cat <<EOF
-Internal command.
-EOF
-}
-
-# Start server using nc -e, which is the only reliable BusyBox-friendly mode.
-phpctl_run_listener_forever() {
-    listen="$1"
-    mode="$2"
-
-    cmd_exists "${NC_BIN}" || die "nc binary not found"
-    nc_supports_exec || die "Current nc implementation does not support exec mode (-e). BusyBox nc with -e is required for the built-in server."
-
-    case "${listen}" in
-        /*)
-            nc_supports_unix_sockets || die "Current nc implementation does not support Unix sockets (-U missing)"
-            rm -f "${listen}"
-            while :; do
-                "${NC_BIN}" -l -U "${listen}" -e "${SELF_PATH}" "__${mode}_stdio"
-            done
-            ;;
-        *)
-            listen_host="${listen%:*}"
-            listen_port="${listen##*:}"
-            [ -n "${listen_host}" ] || die "Invalid listen value: ${listen}"
-            [ -n "${listen_port}" ] || die "Invalid listen value: ${listen}"
-            while :; do
-                "${NC_BIN}" -l -p "${listen_port}" -s "${listen_host}" -e "${SELF_PATH}" "__${mode}_stdio"
-            done
-            ;;
-    esac
-}
-
-phpctl_server_run() {
-    listen="${PHPCTL_SERVER_LISTEN}"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --listen)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --listen"
-                listen="$1"
-                shift
-                ;;
-            -h|--help)
-                server_usage
-                return 0
-                ;;
-            *)
-                die "Unknown server option: $1"
-                ;;
-        esac
-    done
-
-    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
-
-    case "${OUTPUT_FORMAT}" in
-        text)
-            printf 'server_listen: %s\n' "${listen}" >&2
-            ;;
-        json|tsv)
-            emit_object <<EOF
-listen=${listen}
-mode=server
-transport=nc-exec
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-
-    phpctl_run_listener_forever "${listen}" "server"
-}
-
-serve_http() {
-    listen="${PHPCTL_SERVE_LISTEN}"
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --listen)
-                shift
-                [ $# -gt 0 ] || die "Missing value for --listen"
-                listen="$1"
-                shift
-                ;;
-            -h|--help)
-                serve_usage
-                return 0
-                ;;
-            *)
-                die "Unknown serve option: $1"
-                ;;
-        esac
-    done
-
-    phpctl_validate_endpoint "${listen}" || die "Invalid listen value: ${listen}"
-
-    case "${OUTPUT_FORMAT}" in
-        text)
-            printf 'serve_listen: %s\n' "${listen}" >&2
-            ;;
-        json|tsv)
-            emit_object <<EOF
-listen=${listen}
-mode=serve
-transport=nc-exec
-EOF
-            ;;
-        *)
-            die "Unsupported output format: ${OUTPUT_FORMAT}"
-            ;;
-    esac
-
-    phpctl_run_listener_forever "${listen}" "serve"
-}
-
-# Internal stdio entrypoints for nc -e.
 case "${1:-}" in
     __serve_stdio)
         shift
@@ -4163,6 +4986,10 @@ EOF
     client)
         shift
         phpctl_client_run "$@"
+        ;;
+    worker)
+        shift
+        handle_worker "$@"
         ;;
     ext)
         shift

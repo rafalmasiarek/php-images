@@ -1,0 +1,47 @@
+services:
+  worker-a:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-a
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  worker-b:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-b
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  worker-c:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-c
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  loadbalancer:
+    build:
+      context: ..
+      dockerfile: loadbalancer/Dockerfile
+    environment:
+      LB_ROUTES_FILE: /config/routes.json
+      LB_CADDY_ADMIN_LISTEN: 127.0.0.1:2019
+      LB_CADDY_ADMIN_URL: http://127.0.0.1:2019
+      LB_RELOAD_INTERVAL_SECONDS: "5"
+      LB_LOG_LEVEL: INFO
+      LB_LOG_FORMAT: json
+    volumes:
+      - ./routes.json:/config/routes.json:ro
+    ports:
+      - "8081:80"
+    depends_on:
+      - worker-a
+      - worker-b
+      - worker-c

@@ -1,0 +1,7 @@
+[
+  {
+    "name": "worker-d",
+    "endpoint": "http://worker-d:8080",
+    "status": "ready"
+  }
+]

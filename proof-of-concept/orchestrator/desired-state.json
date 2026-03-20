@@ -1,0 +1,82 @@
+{
+    "controller_id": "phpctl-orchestrator",
+    "reconcile_interval_seconds": 15,
+    "request_timeout_seconds": 5,
+    "state_file": "/var/lib/php-orchestrator/state.json",
+    "lock_file": "/var/lib/php-orchestrator/reconcile.lock",
+    "load_balancer": {
+        "enabled": true,
+        "snapshot_path": "/var/lib/php-orchestrator/loadbalancer-routes.json",
+        "publish_url": "http://loadbalancer:8081/load",
+        "request_timeout_seconds": 5,
+        "publish_only_when_changed": true
+    },
+    "discovery": {
+        "static_workers": [
+            {
+                "name": "worker-a",
+                "endpoint": "http://worker-a:8080",
+                "status": "ready",
+                "labels": {
+                    "lb-address": "worker-a"
+                }
+            },
+            {
+                "name": "worker-b",
+                "endpoint": "http://worker-b:8080",
+                "status": "ready",
+                "labels": {
+                    "lb-address": "worker-b"
+                }
+            }
+        ],
+        "file_workers_path": "/config/workers.json",
+        "dns_endpoints": []
+    },
+    "rebalance": {
+        "enabled": true,
+        "max_moves_per_reconcile": 1,
+        "min_score_improvement": 15,
+        "cooldown_seconds": 120
+    },
+    "allocations": [
+        {
+            "allocation_id": "api-main",
+            "replicas": 3,
+            "match": {
+                "worker_group": "blue",
+                "labels": {
+                    "region": "eu",
+                    "tier": "prod"
+                }
+            },
+            "fallback_to_free_workers": true,
+            "strategy": "balanced",
+            "pool": {
+                "params": {
+                    "PM": "dynamic",
+                    "PM_MAX_CHILDREN": "16",
+                    "PM_START_SERVERS": "4",
+                    "PM_MIN_SPARE_SERVERS": "2",
+                    "PM_MAX_SPARE_SERVERS": "6",
+                    "ENABLE_PING": "true",
+                    "ENABLE_METRICS": "true",
+                    "STATUS_PATH": "/fpm-status",
+                    "PING_PATH": "/fpm-ping",
+                    "PING_RESPONSE": "pong"
+                }
+            },
+            "load_balancer": {
+                "enabled": true,
+                "route_id": "api-main",
+                "hosts": [
+                    "api.local.test"
+                ],
+                "path": "/",
+                "upstream_port": 9000,
+                "health_uri": "/fpm-ping",
+                "tls": false
+            }
+        }
+    ]
+}

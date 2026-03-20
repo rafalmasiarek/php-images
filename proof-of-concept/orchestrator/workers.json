@@ -1,0 +1,10 @@
+[
+    {
+        "name": "worker-c",
+        "endpoint": "http://worker-c:8080",
+        "status": "ready",
+        "labels": {
+            "lb-address": "worker-c"
+        }
+    }
+]

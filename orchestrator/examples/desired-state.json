@@ -1,0 +1,60 @@
+{
+  "controller_id": "phpctl-orchestrator",
+  "reconcile_interval_seconds": 15,
+  "request_timeout_seconds": 5,
+  "state_file": "/var/lib/php-orchestrator/state.json",
+  "lock_file": "/var/lib/php-orchestrator/reconcile.lock",
+  "discovery": {
+    "static_workers": [
+      {
+        "name": "worker-a",
+        "endpoint": "http://worker-a:8080",
+        "status": "ready"
+      },
+      {
+        "name": "worker-b",
+        "endpoint": "http://worker-b:8080",
+        "status": "ready"
+      }
+    ],
+    "file_workers_path": "/config/workers.json",
+    "dns_endpoints": [
+      "http://worker-c:8080"
+    ]
+  },
+  "rebalance": {
+    "enabled": true,
+    "max_moves_per_reconcile": 1,
+    "min_score_improvement": 15,
+    "cooldown_seconds": 120
+  },
+  "allocations": [
+    {
+      "allocation_id": "api-main",
+      "replicas": 3,
+      "match": {
+        "worker_group": "blue",
+        "labels": {
+          "region": "eu",
+          "tier": "prod"
+        }
+      },
+      "fallback_to_free_workers": true,
+      "strategy": "balanced",
+      "pool": {
+        "params": {
+          "PM": "dynamic",
+          "PM_MAX_CHILDREN": "16",
+          "PM_START_SERVERS": "4",
+          "PM_MIN_SPARE_SERVERS": "2",
+          "PM_MAX_SPARE_SERVERS": "6",
+          "ENABLE_PING": "true",
+          "ENABLE_METRICS": "true",
+          "STATUS_PATH": "/fpm-status",
+          "PING_PATH": "/fpm-ping",
+          "PING_RESPONSE": "pong"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "admin": {
+{% if disable_admin %}
+    "disabled": true
+{% else %}
+    "listen": "{{ admin_listen }}"
+{% endif %}
+  },
+  "logging": {
+    "logs": {
+      "default": {
+        "level": "{{ log_level }}",
+        "writer": {
+          "output": "stdout"
+        },
+        "encoder": {
+          "format": "json"
+        }
+      }
+    }
+  },
+  "apps": {
+    "http": {
+      "servers": {}
+    }
+  }
+}

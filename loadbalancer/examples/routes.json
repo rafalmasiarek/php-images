@@ -1,0 +1,51 @@
+{
+  "defaults": {
+    "lb_policy": "round_robin",
+    "health_uri": "/healthz",
+    "health_interval": "10s",
+    "health_timeout": "3s",
+    "health_fails": 2,
+    "health_passes": 1,
+    "fail_duration": "30s",
+    "max_fails": 3
+  },
+  "routes": [
+    {
+      "site_id": "api-main",
+      "host": "api.local.test",
+      "path_prefix": "/",
+      "tls_enabled": false,
+      "encode_gzip": true,
+      "upstreams": [
+        {
+          "dial": "worker-a:8080",
+          "health_uri": "/healthz",
+          "request_header_up": {
+            "X-Forwarded-Proto": "http"
+          }
+        },
+        {
+          "dial": "worker-b:8080",
+          "health_uri": "/healthz",
+          "request_header_up": {
+            "X-Forwarded-Proto": "http"
+          }
+        }
+      ],
+      "response_headers": {
+        "X-Load-Balancer": "caddy"
+      }
+    },
+    {
+      "site_id": "admin-main",
+      "host": "admin.local.test",
+      "path_prefix": "/",
+      "tls_enabled": false,
+      "encode_gzip": true,
+      "lb_policy": "least_conn",
+      "upstreams": [
+        "worker-c:8080"
+      ]
+    }
+  ]
+}

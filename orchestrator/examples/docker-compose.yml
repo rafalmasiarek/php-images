@@ -1,0 +1,49 @@
+services:
+  worker-a:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-a
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  worker-b:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-b
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  worker-c:
+    image: ghcr.io/rafalmasiarek/php:8.5-fpm
+    environment:
+      PHPCTL_WORKER_ID: worker-c
+      PHPCTL_WORKER_GROUP: blue
+      PHPCTL_WORKER_LABEL_REGION: eu
+      PHPCTL_WORKER_LABEL_TIER: prod
+      PHPCTL_WORKER_MAX_POOLS: "20"
+      PHPCTL_WORKER_MAX_CHILDREN_TOTAL: "128"
+      PHPCTL_WORKER_MAX_REPLICAS: "20"
+    command: ["phpctl", "server", "--listen", "0.0.0.0:8080"]
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    volumes:
+      - ./desired-state.json:/config/desired-state.json:ro
+      - ./workers.json:/config/workers.json:ro
+    command: ["python", "-m", "app.main", "--config", "/config/desired-state.json", "--loop"]
+    depends_on:
+      - worker-a
+      - worker-b
+      - worker-c

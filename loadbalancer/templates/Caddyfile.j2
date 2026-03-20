@@ -1,0 +1,55 @@
+{
+    admin {{ env "LB_CADDY_ADMIN_LISTEN" | default("127.0.0.1:2019") }}
+{% if env "LB_CADDY_PERSIST_CONFIG" | default("true") in ["0", "false", "False", "no", "off"] %}
+    persist_config off
+{% endif %}
+    log {
+        level {{ env "LB_CADDY_LOG_LEVEL" | default("INFO") | lower }}
+        output stdout
+        format json
+    }
+}
+
+{% for route in routes %}
+{{ route.host }} {
+{% if route.encode_gzip %}
+    encode gzip zstd
+{% endif %}
+{% if not route.tls_enabled %}
+    auto_https disable_redirects
+    tls internal
+{% endif %}
+{% if route.path_prefix != "/" %}
+    @match_{{ route.site_id | replace("-", "_") }} path {{ route.path_prefix }}*
+{% endif %}
+    reverse_proxy {% if route.path_prefix != "/" %}@match_{{ route.site_id | replace("-", "_") }} {% endif %}{% for upstream in route.upstreams %}{{ upstream.dial }}{% if not loop.last %} {% endif %}{% endfor %} {
+        lb_policy {{ route.lb_policy }}
+        health_uri {{ route.upstreams[0].health_uri or "/healthz" }}
+        health_interval {{ route.health_interval }}
+        health_timeout {{ route.health_timeout }}
+        health_fails {{ route.health_fails }}
+        health_passes {{ route.health_passes }}
+        fail_duration {{ route.fail_duration }}
+        max_fails {{ route.max_fails }}
+{% for upstream in route.upstreams %}
+{% if upstream.request_header_up %}
+{% for key, value in upstream.request_header_up.items() %}
+        header_up {{ key }} {{ value }}
+{% endfor %}
+{% endif %}
+{% if upstream.request_header_down %}
+{% for key, value in upstream.request_header_down.items() %}
+        header_down {{ key }} {{ value }}
+{% endfor %}
+{% endif %}
+{% endfor %}
+    }
+{% if route.response_headers %}
+    header {
+{% for key, value in route.response_headers.items() %}
+        {{ key }} {{ value }}
+{% endfor %}
+    }
+{% endif %}
+}
+{% endfor %}
