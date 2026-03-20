@@ -232,7 +232,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Cache Trivy data
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/trivy
           key: trivy-${{ runner.os }}-${{ runner.arch }}-latest
@@ -241,7 +241,7 @@ jobs:
         uses: aquasecurity/setup-trivy@v0.2.6
 
       - name: Cache sanityctl
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sanityctl
           key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest

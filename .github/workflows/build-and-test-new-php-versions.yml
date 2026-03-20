@@ -229,7 +229,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Cache Trivy data
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/trivy
           key: trivy-${{ runner.os }}-${{ runner.arch }}-latest
@@ -257,7 +257,7 @@ jobs:
             type=gha,mode=max,scope=${{ matrix.mm }}-${{ matrix.variant }}
 
       - name: Cache sanityctl
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/sanityctl
           key: sanityctl-${{ runner.os }}-${{ runner.arch }}-latest
@@ -595,19 +595,19 @@ jobs:
           } >> "$REPORT_PATH"
 
       - name: Upload report artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: php-report-${{ matrix.mm }}-${{ matrix.variant }}
           path: ${{ steps.sanity.outputs.path }}
 
       - name: Upload Trivy pre-scan artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-pre-${{ matrix.mm }}-${{ matrix.variant }}
           path: trivy-results-pre.json
 
       - name: Upload Trivy post-scan artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-post-${{ matrix.mm }}-${{ matrix.variant }}
           path: trivy-results-post.json
