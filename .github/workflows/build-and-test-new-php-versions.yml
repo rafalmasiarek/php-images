@@ -53,7 +53,7 @@ jobs:
             export HEAD_SHA="${{ github.event.pull_request.head.sha }}"
             export BASE_REF="${{ github.event.pull_request.base.ref }}"
 
-            git fetch origin "$BASE_REF" --depth=1
+            git fetch origin "$BASE_REF"
             export BASE_SHA="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")"
           else
             export BASE_SHA="${{ github.event.before }}"
@@ -81,36 +81,34 @@ jobs:
                   return []
               return sorted(php_dir.glob("*/Dockerfile"))
 
-          def dockerfile_alpine_versions(dockerfile: Path):
-              text = dockerfile.read_text(encoding="utf-8", errors="ignore")
-              for line in text.splitlines():
-                  line = line.strip()
-                  if not line.upper().startswith("FROM "):
-                      continue
+def dockerfile_alpine_versions(dockerfile: Path):
+    text = dockerfile.read_text(encoding="utf-8", errors="ignore")
+    result = ("", "")
 
-                  m = re.search(r"alpine:([0-9]+\.[0-9]+\.[0-9]+)", line, re.IGNORECASE)
-                  if m:
-                      full = m.group(1)
-                      minor = ".".join(full.split(".")[:2])
-                      return full, minor
+    patterns = [
+        r"alpine:([0-9]+\.[0-9]+\.[0-9]+)",
+        r"alpine:([0-9]+\.[0-9]+)",
+        r"alpine([0-9]+\.[0-9]+\.[0-9]+)",
+        r"alpine([0-9]+\.[0-9]+)",
+    ]
 
-                  m = re.search(r"alpine:([0-9]+\.[0-9]+)", line, re.IGNORECASE)
-                  if m:
-                      minor = m.group(1)
-                      return minor, minor
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.upper().startswith("FROM "):
+            continue
 
-                  m = re.search(r"alpine([0-9]+\.[0-9]+\.[0-9]+)", line, re.IGNORECASE)
-                  if m:
-                      full = m.group(1)
-                      minor = ".".join(full.split(".")[:2])
-                      return full, minor
+        for pattern in patterns:
+            m = re.search(pattern, line, re.IGNORECASE)
+            if not m:
+                continue
 
-                  m = re.search(r"alpine([0-9]+\.[0-9]+)", line, re.IGNORECASE)
-                  if m:
-                      minor = m.group(1)
-                      return minor, minor
+            version = m.group(1)
+            parts = version.split(".")
+            minor = ".".join(parts[:2]) if len(parts) >= 2 else version
+            result = (version, minor)
+            break
 
-              return "", ""
+    return result
 
           def dockerfiles_matching_alpine(version: str):
               matched = []
