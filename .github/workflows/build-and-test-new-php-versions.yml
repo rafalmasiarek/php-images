@@ -40,14 +40,23 @@ jobs:
           set -euo pipefail
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
             head="${{ github.event.pull_request.head.sha }}"
+            base_ref="${{ github.event.pull_request.base.ref }}"
+
+            git fetch origin "$base_ref" --depth=1
+            base="$(git merge-base "origin/$base_ref" "$head")"
           else
             base="${{ github.event.before }}"
             head="${{ github.sha }}"
           fi
 
+          echo "BASE=$base"
+          echo "HEAD=$head"
+
           changed="$(git diff --name-only "$base" "$head" | grep -E '^versions/[0-9]+\.[0-9]+/[^/]+/Dockerfile$' || true)"
+
+          echo "Changed Dockerfiles:"
+          printf '%s\n' "$changed"
 
           if [ -z "${changed//[[:space:]]/}" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
