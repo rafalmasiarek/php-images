@@ -7,7 +7,7 @@ on:
       - "versions/**"
       - "rootfs/**"
       - "hotfixes/**"
-      - "build-php-images-sanity.yaml"
+      - "scripts/compute-tags.sh"
       - ".github/workflows/build.yml"
   schedule:
     - cron: "17 3 * * *"
@@ -60,96 +60,126 @@ jobs:
         shell: bash
         env:
           GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
           python3 - <<'PY'
           import json
           import os
           import subprocess
           from pathlib import Path
-          
+
           root = Path("versions")
           if not root.exists():
               raise SystemExit("versions/ directory not found")
-          
+
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           before = os.environ.get("GITHUB_EVENT_BEFORE", "")
           sha = os.environ.get("GITHUB_SHA", "")
-          
+
           def all_php_versions() -> list[str]:
-              return sorted([p.name for p in root.iterdir() if p.is_dir()])
-          
-          def dockerfiles_for_php(php: str) -> list[Path]:
-              return sorted((root / php).glob("*/Dockerfile")) if (root / php).exists() else []
-          
+              return sorted(p.name for p in root.iterdir() if p.is_dir())
+
+          def variants_for_php(php: str) -> list[str]:
+              php_dir = root / php
+              if not php_dir.exists():
+                  return []
+              return sorted(
+                  p.name
+                  for p in php_dir.iterdir()
+                  if p.is_dir() and (p / "Dockerfile").exists()
+              )
+
+          def dockerfile_for(php: str, variant: str) -> Path | None:
+              path = root / php / variant / "Dockerfile"
+              return path if path.exists() else None
+
+          def all_variant_pairs() -> list[tuple[str, str]]:
+              pairs: list[tuple[str, str]] = []
+              for php in all_php_versions():
+                  for variant in variants_for_php(php):
+                      pairs.append((php, variant))
+              return sorted(pairs)
+
           changed: list[str] | None = None
+
           if event in ("schedule", "workflow_dispatch"):
               changed = None
           elif event == "push" and before and before != "0000000000000000000000000000000000000000":
-              out = subprocess.check_output(["git", "diff", "--name-only", f"{before}..{sha}"], text=True)
+              out = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{before}..{sha}"],
+                  text=True,
+              )
               changed = [p.strip() for p in out.splitlines() if p.strip()]
           else:
               changed = None
-          
+
           full_build = False
-          touched_phps: set[str] = set()
-          
+          touched_pairs: set[tuple[str, str]] = set()
+
           if changed is None:
               full_build = True
           else:
               for path in changed:
-                  if path.startswith("versions/"):
-                      parts = path.split("/")
-                      if len(parts) >= 2 and parts[1]:
-                          touched_phps.add(parts[1])
-                          continue
-          
-                  if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
-                      full_build = True
-                      continue
-          
-                  if path.startswith("hotfixes/php/"):
-                      parts = path.split("/")
-                      if len(parts) >= 3 and parts[2]:
-                          touched_phps.add(parts[2])
-                          continue
-          
-                  if path.startswith("rootfs/"):
-                      full_build = True
-                      continue
-          
                   if path in {
                       ".github/workflows/build.yml",
-                      ".github/workflows/build-php-images-sanity.yml",
                       "scripts/compute-tags.sh",
                   }:
                       full_build = True
                       continue
-          
-          include = []
-          phps_to_build: list[str]
-          
+
+                  if path.startswith("rootfs/"):
+                      full_build = True
+                      continue
+
+                  if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
+                      full_build = True
+                      continue
+
+                  if path.startswith("versions/"):
+                      parts = path.split("/")
+                      if len(parts) >= 3 and parts[1] and parts[2]:
+                          php = parts[1]
+                          variant = parts[2]
+                          if dockerfile_for(php, variant):
+                              touched_pairs.add((php, variant))
+                      continue
+
+                  if path.startswith("hotfixes/php/"):
+                      parts = path.split("/")
+                      if len(parts) >= 5 and parts[2] and parts[3]:
+                          php = parts[2]
+                          target = parts[3]
+
+                          if target == "all":
+                              for variant in variants_for_php(php):
+                                  touched_pairs.add((php, variant))
+                          else:
+                              variant = target
+                              if dockerfile_for(php, variant):
+                                  touched_pairs.add((php, variant))
+                      continue
+
           if full_build:
-              phps_to_build = all_php_versions()
-              dockerfiles = sorted(root.glob("*/*/Dockerfile"))
+              pairs_to_build = all_variant_pairs()
           else:
-              phps_to_build = sorted(touched_phps)
-              dockerfiles = []
-              for php in phps_to_build:
-                  dockerfiles.extend(dockerfiles_for_php(php))
-              dockerfiles = sorted(set(dockerfiles))
-          
-          for dockerfile in dockerfiles:
-              php = dockerfile.parts[1]
-              variant = dockerfile.parts[2]
-              include.append({
-                  "php": php,
-                  "variant": variant,
-                  "context": f"versions/{php}/{variant}",
-                  "dockerfile": f"versions/{php}/{variant}/Dockerfile",
-              })
-          
+              pairs_to_build = sorted(touched_pairs)
+
+          include = []
+          phps_to_build = sorted({php for php, _ in pairs_to_build})
+
+          for php, variant in pairs_to_build:
+              include.append(
+                  {
+                      "php": php,
+                      "variant": variant,
+                      "context": f"versions/{php}/{variant}",
+                      "dockerfile": f"versions/{php}/{variant}/Dockerfile",
+                  }
+              )
+
           matrix = {"include": include}
-          
+
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as fh:
               fh.write("matrix=" + json.dumps(matrix) + "\n")
@@ -294,22 +324,22 @@ jobs:
           import os
           from datetime import datetime, timezone
           from pathlib import Path
-          
+
           php = "${{ matrix.php }}"
           src = Path("web/_data/php-eol.json")
           dst = Path(".lifecycle.env")
-          
+
           version = php
           eol = ""
-          
+
           if src.exists():
               obj = json.loads(src.read_text(encoding="utf-8"))
               info = obj.get(php, {})
               version = str(info.get("version") or php)
               eol = str(info.get("eol") or "")
-          
+
           built_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-          
+
           dst.write_text(
               "\n".join(
                   [
@@ -321,7 +351,7 @@ jobs:
               ),
               encoding="utf-8",
           )
-          
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
               fh.write(f"version={version}\n")
               fh.write(f"eol={eol}\n")
@@ -428,7 +458,7 @@ jobs:
           log="/tmp/phpctl-check-${{ matrix.php }}-${{ matrix.variant }}.txt"
 
           {
-            echo "<!-- php-report:${{ matrix.mm }}:${{ matrix.variant }} -->"
+            echo "<!-- php-report:${{ matrix.php }}:${{ matrix.variant }} -->"
             echo "### sanityctl validation for ${IMAGE_TAG}"
             echo
             sanityctl run -f build-php-images-sanity.yaml --output text --summary markdown
@@ -905,14 +935,16 @@ jobs:
           medium=${MED}
           EOF
 
+          export CRIT HIGH MED OS
+
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
-          
+
           def csv_list(value: str) -> list[str]:
               return [item for item in (value or "").split(",") if item]
-          
+
           php = os.environ["PHP_VERSION"]
           variant = os.environ["VARIANT"]
           image_sha = os.environ["IMAGE_SHA"]
@@ -928,12 +960,16 @@ jobs:
           new_cves = csv_list(os.environ.get("NEW_CVES", ""))
           alpine_full = os.environ.get("ALPINE_IMAGE_FULL") or os.environ.get("ALPINE_DOCKERFILE_FULL") or "unknown"
           alpine_minor = os.environ.get("ALPINE_IMAGE_MINOR") or os.environ.get("ALPINE_DOCKERFILE_MINOR") or "unknown"
-          
+          os_version = os.environ.get("OS", "unknown")
+          critical = int(os.environ.get("CRIT") or "0")
+          high = int(os.environ.get("HIGH") or "0")
+          medium = int(os.environ.get("MED") or "0")
+
           selected_scripts_path = Path(".hotfixes-selected-files.txt")
           selected_scripts = []
           if selected_scripts_path.exists():
               selected_scripts = [line.strip() for line in selected_scripts_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-          
+
           hotfix_meta = {
               "php": php,
               "variant": variant,
@@ -952,12 +988,31 @@ jobs:
               "new_cves": new_cves,
               "selected_scripts": selected_scripts,
           }
-          
+
           Path(f"out/hotfix-meta-{php}-{variant}.json").write_text(
               json.dumps(hotfix_meta, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
-          
+
+          state = {
+              "php": php,
+              "variant": variant,
+              "os": os_version,
+              "image_sha": image_sha,
+              "image_date": image_date,
+              "image_moving": image_moving,
+              "digest": digest,
+              "critical": critical,
+              "high": high,
+              "medium": medium,
+              "report_file": f"trivy-{php}-{variant}.html",
+          }
+
+          Path(f"out/state-{php}-{variant}.json").write_text(
+              json.dumps(state, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+
           def is_php_specific_package(pkg: str) -> bool:
               pkg = (pkg or "").strip().lower()
               if not pkg:
@@ -967,10 +1022,10 @@ jobs:
               if pkg.startswith("php"):
                   return True
               return False
-          
+
           trivy = json.loads(Path("trivy-results.json").read_text(encoding="utf-8"))
           records = []
-          
+
           for result in trivy.get("Results") or []:
               for vuln in result.get("Vulnerabilities") or []:
                   package = vuln.get("PkgName") or ""
@@ -994,7 +1049,7 @@ jobs:
                           "primary_url": vuln.get("PrimaryURL") or "",
                       }
                   )
-          
+
           Path(f"out/vulns-{php}-{variant}.json").write_text(
               json.dumps(records, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
@@ -1047,6 +1102,13 @@ jobs:
           path: out/vulns-${{ matrix.php }}-${{ matrix.variant }}.json
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v7
+        if: hashFiles(format('out/state-{0}-{1}.json', matrix.php, matrix.variant)) != ''
+        with:
+          name: state-${{ matrix.php }}-${{ matrix.variant }}
+          path: out/state-${{ matrix.php }}-${{ matrix.variant }}.json
+          if-no-files-found: error
+
   sync-security-issues:
     name: sync security issues
     needs: [discover, build]
@@ -1092,7 +1154,7 @@ jobs:
           import json
           from pathlib import Path
           import os
-          
+
           severity_rank = {
               "UNKNOWN": 0,
               "LOW": 1,
@@ -1100,14 +1162,14 @@ jobs:
               "HIGH": 3,
               "CRITICAL": 4,
           }
-          
+
           hotfix_by_variant = {}
           for path in sorted(Path("artifacts/hotfix-meta").glob("*.json")):
               obj = json.loads(path.read_text(encoding="utf-8"))
               hotfix_by_variant[(obj.get("php", ""), obj.get("variant", ""))] = obj
-          
+
           groups = {}
-          
+
           for path in sorted(Path("artifacts/vulns").glob("*.json")):
               items = json.loads(path.read_text(encoding="utf-8"))
               for item in items:
@@ -1117,12 +1179,12 @@ jobs:
                   alpine_minor = item.get("alpine_minor") or "unknown"
                   if not cve:
                       continue
-          
+
                   if scope == "php":
                       key = f"php|{php}|{alpine_minor}|{cve}"
                   else:
                       key = f"os|{alpine_minor}|{cve}"
-          
+
                   group = groups.setdefault(
                       key,
                       {
@@ -1140,18 +1202,18 @@ jobs:
                           "matched_hotfix_scripts": set(),
                       },
                   )
-          
+
                   current_severity = item.get("severity") or "UNKNOWN"
                   if severity_rank.get(current_severity, 0) > severity_rank.get(group["severity"], 0):
                       group["severity"] = current_severity
-          
+
                   if item.get("alpine_full"):
                       group["alpine_full_versions"].add(item["alpine_full"])
                   if php:
                       group["php_branches"].add(php)
                   if item.get("variant"):
                       group["variants"].add(item["variant"])
-          
+
                   group["package_rows"].add(
                       (
                           item.get("package") or "",
@@ -1159,10 +1221,10 @@ jobs:
                           item.get("fixed_version") or "",
                       )
                   )
-          
+
                   if item.get("primary_url"):
                       group["primary_urls"].add(item["primary_url"])
-          
+
                   group["images"].append(
                       {
                           "php": php,
@@ -1171,14 +1233,14 @@ jobs:
                           "digest": item.get("digest") or "",
                       }
                   )
-          
+
                   variant_key = (php, item.get("variant") or "")
                   hotfix_meta = hotfix_by_variant.get(variant_key, {})
                   for script in hotfix_meta.get("selected_scripts") or []:
                       name = os.path.basename(script)
                       if name.startswith(f"{cve}-"):
                           group["matched_hotfix_scripts"].add(script)
-          
+
           normalized = []
           for group in groups.values():
               images = []
@@ -1189,7 +1251,7 @@ jobs:
                       continue
                   seen_images.add(key)
                   images.append(image)
-          
+
               normalized.append(
                   {
                       "scope": group["scope"],
@@ -1214,7 +1276,7 @@ jobs:
                       "matched_hotfix_scripts_count": len(group["matched_hotfix_scripts"]),
                   }
               )
-          
+
           Path("aggregated-vulns.json").write_text(
               json.dumps(
                   sorted(
@@ -1610,12 +1672,35 @@ jobs:
           path: artifacts/trivy-html
           merge-multiple: true
 
+      - name: Download state artifacts
+        if: needs.discover.outputs.count != '0'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: state-*
+          path: artifacts/state
+          merge-multiple: true
+
       - name: Fetch PHP lifecycle data for releases
         if: needs.discover.outputs.count != '0'
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/fetch-php-eol.py
+
+      - name: Merge current build state into repository state
+        if: needs.discover.outputs.count != '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p web/_data/state/images
+
+          for f in artifacts/state/*.json; do
+            [ -e "$f" ] || continue
+            php="$(jq -r '.php' "$f")"
+            variant="$(jq -r '.variant' "$f")"
+            cp "$f" "web/_data/state/images/${php}-${variant}.json"
+          done
 
       - name: Create or update releases
         if: needs.discover.outputs.count != '0' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish_target == 'ghcr')
@@ -1637,30 +1722,16 @@ jobs:
             exit 0
           fi
 
-          find_image_meta() {
+          find_state() {
             local php="$1" variant="$2"
-            local file
-            for file in artifacts/image-meta/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
-                echo "$file"
-                return 0
-              fi
-            done
-            return 1
+            local file="web/_data/state/images/${php}-${variant}.json"
+            [ -f "$file" ] || return 1
+            echo "$file"
           }
 
-          find_trivy_sum() {
-            local php="$1" variant="$2"
-            local file
-            for file in artifacts/trivy/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${php}$" "$file" && grep -q "^variant=${variant}$" "$file"; then
-                echo "$file"
-                return 0
-              fi
-            done
-            return 1
+          state_field() {
+            local file="$1" field="$2"
+            jq -r --arg field "$field" '.[$field] // empty' "$file"
           }
 
           php_lifecycle_field() {
@@ -1669,22 +1740,22 @@ jobs:
           import json
           import sys
           from pathlib import Path
-          
+
           php = sys.argv[1]
           field = sys.argv[2]
           path = Path("web/_data/php-eol.json")
-          
+
           if not path.exists():
               print("")
               raise SystemExit(0)
-          
+
           obj = json.loads(path.read_text(encoding="utf-8"))
           info = obj.get(php, {})
           value = info.get(field, "")
           print(value if value is not None else "")
           PY
           }
-            
+
           urlencode() {
             python3 - "$1" <<'PY'
           import sys
@@ -1738,16 +1809,8 @@ jobs:
             fi
 
             for V in "${VARIANTS[@]}"; do
-              if ! find_image_meta "$PHP" "$V" >/dev/null; then
-                echo "Missing image metadata for ${PHP}/${V}." >&2
-                exit 1
-              fi
-              if ! find_trivy_sum "$PHP" "$V" >/dev/null; then
-                echo "Missing Trivy summary for ${PHP}/${V}." >&2
-                exit 1
-              fi
-              if [ ! -f "artifacts/trivy-html/trivy-${PHP}-${V}.html" ]; then
-                echo "Missing Trivy HTML report for ${PHP}/${V}." >&2
+              if ! find_state "$PHP" "$V" >/dev/null; then
+                echo "Missing state for ${PHP}/${V}." >&2
                 exit 1
               fi
             done
@@ -1766,13 +1829,13 @@ jobs:
             TRIVY_TOTAL_BADGE="$(shields_endpoint "${SITE_BASE_URL}/badges/trivy-total.json")"
 
             OS_VER=""
-            if find_image_meta "$PHP" "cli" >/dev/null 2>&1; then
-              META_OS_FILE="$(find_image_meta "$PHP" "cli")"
-              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+            if find_state "$PHP" "cli" >/dev/null 2>&1; then
+              META_OS_FILE="$(find_state "$PHP" "cli")"
+              OS_VER="$(state_field "$META_OS_FILE" os)"
             fi
             if [ -z "$OS_VER" ]; then
-              META_OS_FILE="$(find_image_meta "$PHP" "${VARIANTS[0]}")"
-              OS_VER="$(grep '^os=' "$META_OS_FILE" | cut -d= -f2 || true)"
+              META_OS_FILE="$(find_state "$PHP" "${VARIANTS[0]}")"
+              OS_VER="$(state_field "$META_OS_FILE" os)"
             fi
             ALPINE_BADGE_MD="$(alpine_badge_md "$OS_VER")"
 
@@ -1797,11 +1860,11 @@ jobs:
               echo "| Variant | Moving | Date | SHA | Digest |"
               echo "|---|---|---|---|---|"
               for V in "${VARIANTS[@]}"; do
-                FILE="$(find_image_meta "$PHP" "$V")"
-                SHA=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
-                DATE=$(grep '^image_date=' "$FILE" | cut -d= -f2)
-                MOV=$(grep '^image_moving=' "$FILE" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
+                FILE="$(find_state "$PHP" "$V")"
+                SHA="$(state_field "$FILE" image_sha)"
+                DATE="$(state_field "$FILE" image_date)"
+                MOV="$(state_field "$FILE" image_moving)"
+                DIG="$(state_field "$FILE" digest)"
                 echo "| \`${V}\` | \`${MOV}\` | \`${DATE}\` | \`${SHA}\` | \`${DIG}\` |"
               done
 
@@ -1811,12 +1874,12 @@ jobs:
               echo "| Variant | Image (sha@digest) | CRITICAL | HIGH | MEDIUM | Report |"
               echo "|---|---|---:|---:|---:|---|"
               for V in "${VARIANTS[@]}"; do
-                FILE="$(find_trivy_sum "$PHP" "$V")"
-                IMG=$(grep '^image_sha=' "$FILE" | cut -d= -f2)
-                DIG=$(grep '^digest=' "$FILE" | cut -d= -f2)
-                C=$(grep '^critical=' "$FILE" | cut -d= -f2)
-                H=$(grep '^high=' "$FILE" | cut -d= -f2)
-                M=$(grep '^medium=' "$FILE" | cut -d= -f2)
+                FILE="$(find_state "$PHP" "$V")"
+                IMG="$(state_field "$FILE" image_sha)"
+                DIG="$(state_field "$FILE" digest)"
+                C="$(state_field "$FILE" critical)"
+                H="$(state_field "$FILE" high)"
+                M="$(state_field "$FILE" medium)"
                 R="${SITE_BASE_URL}/reports/trivy-${PHP}-${V}.html"
                 echo "| \`${V}\` | \`${IMG}@${DIG}\` | $C | $H | $M | ${R} |"
               done
@@ -1839,27 +1902,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p web/badges web/reports
+          mkdir -p web/badges web/reports web/_data/state/images
+
+          for report in artifacts/trivy-html/*.html; do
+            [ -e "$report" ] || continue
+            cp "$report" "web/reports/$(basename "$report")"
+          done
 
           for PHP_DIR in versions/*; do
             [ -d "$PHP_DIR" ] || continue
             PHP="$(basename "$PHP_DIR")"
 
             META_FILE=""
-            for file in artifacts/image-meta/*.txt; do
-              [ -e "$file" ] || continue
-              if grep -q "^php=${PHP}$" "$file" && grep -q "^variant=cli$" "$file"; then
+            if [ -f "web/_data/state/images/${PHP}-cli.json" ]; then
+              META_FILE="web/_data/state/images/${PHP}-cli.json"
+            else
+              for file in web/_data/state/images/${PHP}-*.json; do
+                [ -e "$file" ] || continue
                 META_FILE="$file"
                 break
-              fi
-            done
-            if [ -z "$META_FILE" ]; then
-              for file in artifacts/image-meta/*.txt; do
-                [ -e "$file" ] || continue
-                if grep -q "^php=${PHP}$" "$file"; then
-                  META_FILE="$file"
-                  break
-                fi
               done
             fi
 
@@ -1867,8 +1928,8 @@ jobs:
               continue
             fi
 
-            DATE="$(grep '^image_date=' "$META_FILE" | cut -d= -f2 || true)"
-            SHA_TAG="$(grep '^image_sha=' "$META_FILE" | cut -d= -f2 || true)"
+            DATE="$(jq -r '.image_date // "unknown"' "$META_FILE")"
+            SHA_TAG="$(jq -r '.image_sha // ""' "$META_FILE")"
             SHA7="$(printf '%s' "$SHA_TAG" | sed -n 's/.*-sha-\([0-9a-f]\{7\}\).*/\1/p')"
 
             [ -z "$DATE" ] && DATE="unknown"
@@ -1881,18 +1942,14 @@ jobs:
           TOTAL_H=0
           TOTAL_M=0
 
-          for file in artifacts/trivy/*.txt; do
+          for file in web/_data/state/images/*.json; do
             [ -e "$file" ] || continue
 
-            PHP=$(grep '^php=' "$file" | cut -d= -f2)
-            VAR=$(grep '^variant=' "$file" | cut -d= -f2)
-            C=$(grep '^critical=' "$file" | cut -d= -f2)
-            H=$(grep '^high=' "$file" | cut -d= -f2)
-            M=$(grep '^medium=' "$file" | cut -d= -f2)
-
-            C=${C:-0}
-            H=${H:-0}
-            M=${M:-0}
+            PHP="$(jq -r '.php' "$file")"
+            VAR="$(jq -r '.variant' "$file")"
+            C="$(jq -r '.critical // 0' "$file")"
+            H="$(jq -r '.high // 0' "$file")"
+            M="$(jq -r '.medium // 0' "$file")"
 
             TOTAL_C=$((TOTAL_C + C))
             TOTAL_H=$((TOTAL_H + H))
@@ -1909,10 +1966,6 @@ jobs:
 
             printf '%s\n' "{\"schemaVersion\":1,\"label\":\"trivy\",\"message\":\"C:${C} H:${H} M:${M}\",\"color\":\"${COLOR}\"}" > "web/badges/trivy-${PHP}-${VAR}.json"
             printf '%s\n' "{\"php\":\"${PHP}\",\"variant\":\"${VAR}\",\"critical\":${C},\"high\":${H},\"medium\":${M}}" > "web/badges/trivy-${PHP}-${VAR}.data.json"
-
-            if [ -f "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" ]; then
-              cp "artifacts/trivy-html/trivy-${PHP}-${VAR}.html" "web/reports/trivy-${PHP}-${VAR}.html"
-            fi
           done
 
           TOTAL_COLOR="brightgreen"
@@ -1934,7 +1987,7 @@ jobs:
           BUILT="$(date -u +%Y-%m-%d_%H:%M_UTC)"
           printf '%s\n' "{\"schemaVersion\":1,\"label\":\"built\",\"message\":\"${BUILT}\",\"color\":\"blue\"}" > web/badges/built.json
 
-          IMAGES_COUNT=$(find web/badges -maxdepth 1 -type f -name 'trivy-*.json' ! -name 'trivy-total.json' ! -name '*.data.json' | wc -l | tr -d ' ')
+          IMAGES_COUNT=$(find web/_data/state/images -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
           printf '%s\n' "{\"schemaVersion\":1,\"label\":\"images\",\"message\":\"${IMAGES_COUNT}\",\"color\":\"blue\"}" > web/badges/images.json
 
       - name: Generate README
