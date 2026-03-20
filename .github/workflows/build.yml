@@ -66,6 +66,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import re
           import subprocess
           from pathlib import Path
 
@@ -101,6 +102,48 @@ jobs:
                       pairs.append((php, variant))
               return sorted(pairs)
 
+          def all_dockerfiles() -> list[Path]:
+              return sorted(root.glob("*/*/Dockerfile"))
+
+          def dockerfile_alpine_versions(dockerfile: Path) -> tuple[str, str]:
+              text = dockerfile.read_text(encoding="utf-8", errors="ignore")
+              result = ("", "")
+
+              patterns = [
+                  r"alpine:([0-9]+\.[0-9]+\.[0-9]+)",
+                  r"alpine:([0-9]+\.[0-9]+)",
+                  r"alpine([0-9]+\.[0-9]+\.[0-9]+)",
+                  r"alpine([0-9]+\.[0-9]+)",
+              ]
+
+              for line in text.splitlines():
+                  line = line.strip()
+                  if not line.upper().startswith("FROM "):
+                      continue
+
+                  for pattern in patterns:
+                      m = re.search(pattern, line, re.IGNORECASE)
+                      if not m:
+                          continue
+
+                      version = m.group(1)
+                      parts = version.split(".")
+                      minor = ".".join(parts[:2]) if len(parts) >= 2 else version
+                      result = (version, minor)
+                      break
+
+              return result
+
+          def variant_pairs_matching_alpine(version: str) -> list[tuple[str, str]]:
+              matched: list[tuple[str, str]] = []
+              for dockerfile in all_dockerfiles():
+                  full, minor = dockerfile_alpine_versions(dockerfile)
+                  if version and version in {full, minor}:
+                      php = dockerfile.parts[1]
+                      variant = dockerfile.parts[2]
+                      matched.append((php, variant))
+              return sorted(set(matched))
+
           changed: list[str] | None = None
 
           if event in ("schedule", "workflow_dispatch"):
@@ -120,6 +163,10 @@ jobs:
           if changed is None:
               full_build = True
           else:
+              print("Changed files:")
+              for path in changed:
+                  print(f" - {path}")
+
               for path in changed:
                   if path in {
                       ".github/workflows/build.yml",
@@ -132,7 +179,7 @@ jobs:
                       full_build = True
                       continue
 
-                  if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/"):
+                  if path.startswith("hotfixes/all/") or path.startswith("hotfixes/alpine/all/"):
                       full_build = True
                       continue
 
@@ -160,10 +207,25 @@ jobs:
                                   touched_pairs.add((php, variant))
                       continue
 
+                  if path.startswith("hotfixes/alpine/"):
+                      parts = path.split("/")
+                      if len(parts) >= 3 and parts[2]:
+                          alpine_ver = parts[2]
+                          if alpine_ver == "all":
+                              full_build = True
+                          else:
+                              for pair in variant_pairs_matching_alpine(alpine_ver):
+                                  touched_pairs.add(pair)
+                      continue
+
           if full_build:
               pairs_to_build = all_variant_pairs()
           else:
               pairs_to_build = sorted(touched_pairs)
+
+          print("Selected variant pairs:")
+          for php, variant in pairs_to_build:
+              print(f" - {php}/{variant}")
 
           include = []
           phps_to_build = sorted({php for php, _ in pairs_to_build})
@@ -182,9 +244,9 @@ jobs:
 
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as fh:
-              fh.write("matrix=" + json.dumps(matrix) + "\n")
+              fh.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
               fh.write("count=" + str(len(include)) + "\n")
-              fh.write("phps=" + json.dumps(phps_to_build) + "\n")
+              fh.write("phps=" + json.dumps(phps_to_build, separators=(",", ":")) + "\n")
               fh.write("full=" + ("true" if full_build else "false") + "\n")
           PY
 
@@ -487,13 +549,14 @@ jobs:
 
           DOCKERFILE_ALPINE_FULL="$(
             awk '
-              BEGIN { IGNORECASE=1 }
+              BEGIN { IGNORECASE=1; last="" }
               /^FROM[[:space:]]+/ {
-                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
-                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { print m[1]; exit }
+                if (match($0, /alpine:([0-9]+\.[0-9]+\.[0-9]+)/, m)) { last=m[1]; next }
+                if (match($0, /alpine:([0-9]+\.[0-9]+)/, m)) { last=m[1]; next }
+                if (match($0, /alpine([0-9]+\.[0-9]+\.[0-9]+)/, m)) { last=m[1]; next }
+                if (match($0, /alpine([0-9]+\.[0-9]+)/, m)) { last=m[1]; next }
               }
+              END { print last }
             ' "${{ matrix.dockerfile }}" || true
           )"
           DOCKERFILE_ALPINE_FULL="$(printf '%s' "$DOCKERFILE_ALPINE_FULL" | tr -d '\r\n')"
