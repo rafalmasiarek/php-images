@@ -1359,7 +1359,7 @@ jobs:
 
       - name: Create, update, and close security issues
         if: needs.discover.outputs.count != '0'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           FULL_BUILD: ${{ needs.discover.outputs.full }}
         with:
