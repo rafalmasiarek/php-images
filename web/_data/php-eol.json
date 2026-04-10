@@ -164,19 +164,19 @@
     "eol": "2028-12-31",
     "is_eol": false,
     "is_maintained": true,
-    "latest_date": "2026-03-12",
+    "latest_date": "2026-04-09",
     "php": "8.4",
     "release_date": "2024-11-21",
-    "version": "8.4.19"
+    "version": "8.4.20"
   },
   "8.5": {
     "eoas": "2027-12-31",
     "eol": "2029-12-31",
     "is_eol": false,
     "is_maintained": true,
-    "latest_date": "2026-03-12",
+    "latest_date": "2026-04-09",
     "php": "8.5",
     "release_date": "2025-11-20",
-    "version": "8.5.4"
+    "version": "8.5.5"
   }
 }
