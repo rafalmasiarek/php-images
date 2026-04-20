@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.23
-FROM php:8.5.4-cli-alpine3.23 AS builder
+FROM php:8.5.5-cli-alpine3.23 AS builder
 
 ARG PECL_FILE=pecl.txt
 ARG PHPCTL_VERSION=0.3.6
@@ -42,7 +42,7 @@ RUN set -eux; \
   phpctl ext cleanup; \
   apk del .build-deps
 
-FROM php:8.5.4-cli-alpine3.23 AS runtime
+FROM php:8.5.5-cli-alpine3.23 AS runtime
 
 RUN set -eux; \
   apk add --no-cache \
