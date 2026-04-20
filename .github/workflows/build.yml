@@ -1359,7 +1359,7 @@ jobs:
 
       - name: Create, update, and close security issues
         if: needs.discover.outputs.count != '0'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           FULL_BUILD: ${{ needs.discover.outputs.full }}
         with:
@@ -2156,7 +2156,7 @@ jobs:
           bundle exec jekyll build --config _config.yml,_config.dynamic.yml -d ../_site_web
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site_web
 
