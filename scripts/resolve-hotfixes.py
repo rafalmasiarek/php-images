@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-resolve_hotfixes.py
+resolve-hotfixes.py
 
 Resolve hotfix scripts from:
 - a Trivy JSON report

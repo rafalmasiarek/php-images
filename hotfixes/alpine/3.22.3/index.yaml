@@ -1,0 +1,28 @@
+hotfixes:
+  # BEGIN AUTO-GENERATED HOTFIX
+  # generator: legacy-cve-grouping-v2
+  # source_suffix: libexpat
+  # content_sha256: 3c999914a9813e1f8d267ee10c33f1fff24a0bf44b5ba7925872d9085baa5cf2
+  # group_size: 3
+  # legacy_files: CVE-2026-32767-libexpat.sh, CVE-2026-32777-libexpat.sh, CVE-2026-32778-libexpat.sh
+  - id: "apk-upgrade-libexpat"
+    file: "apk-upgrade-libexpat.sh"
+    match:
+      cves:
+        - "CVE-2026-32767"
+        - "CVE-2026-32777"
+        - "CVE-2026-32778"
+  # END AUTO-GENERATED HOTFIX
+  # BEGIN AUTO-GENERATED HOTFIX
+  # generator: legacy-cve-grouping-v2
+  # source_suffix: postgresql
+  # content_sha256: e2ba7cf0fc813e0f15c36e707c3b9b4faff6d7ea9d899942567e795453b643f3
+  # group_size: 2
+  # legacy_files: CVE-2026-2006-postgresql.sh, CVE-2026-2007-postgresql.sh
+  - id: "apk-upgrade-batch-postgresql"
+    file: "apk-upgrade-batch-postgresql.sh"
+    match:
+      cves:
+        - "CVE-2026-2006"
+        - "CVE-2026-2007"
+  # END AUTO-GENERATED HOTFIX

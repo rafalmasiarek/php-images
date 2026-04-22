@@ -1,3 +1,3 @@
 #!/bin/sh
-set -e
+set -eux
 apk upgrade --no-cache musl-utils

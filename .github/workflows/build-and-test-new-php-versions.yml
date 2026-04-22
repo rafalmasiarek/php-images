@@ -419,20 +419,13 @@ jobs:
 
           rm -rf .hotfixes-selected
           mkdir -p .hotfixes-selected
-          : > .hotfixes-selected-files.txt
 
-          mapfile -t CVES < <(
-            jq -r '.Results[]?.Vulnerabilities[]?.VulnerabilityID // empty' trivy-results-pre.json | sort -u
-          )
+          declare -a SEARCH_DIR_ARGS=()
 
-          declare -a SEARCH_DIRS=()
           add_dir() {
             local dir="$1"
             [ -z "$dir" ] && return 0
-            for existing in "${SEARCH_DIRS[@]:-}"; do
-              [ "$existing" = "$dir" ] && return 0
-            done
-            SEARCH_DIRS+=("$dir")
+            SEARCH_DIR_ARGS+=(--search-dir "$dir")
           }
 
           add_dir "hotfixes/all"
@@ -444,52 +437,59 @@ jobs:
           add_dir "hotfixes/php/${{ matrix.mm }}/all"
           add_dir "hotfixes/php/${{ matrix.mm }}/${{ matrix.variant }}"
 
-          declare -a MATCHED_CVES=()
-          declare -a UNMATCHED_CVES=()
-          declare -a SELECTED_FILES=()
+          python3 scripts/resolve-hotfixes.py \
+            --trivy trivy-results-pre.json \
+            "${SEARCH_DIR_ARGS[@]}" \
+            --copy-to .hotfixes-selected \
+            --selection-manifest-name selection.json \
+            --output .hotfixes-selected-report.json
 
-          found=0
-          idx=0
+          selected_count="$(
+            jq -r '.stats.selected_hotfixes // 0' .hotfixes-selected-report.json
+          )"
 
-          for cve in "${CVES[@]}"; do
-            matched_this_cve=0
+          matched_cves="$(
+            jq -r '
+              [
+                .matched_by
+                | to_entries[]
+                | .value[]
+                | select(startswith("cve:"))
+                | sub("^cve:"; "")
+              ]
+              | unique
+              | join(",")
+            ' .hotfixes-selected-report.json
+          )"
 
-            for dir in "${SEARCH_DIRS[@]}"; do
-              [ -d "$dir" ] || continue
-              shopt -s nullglob
-              for f in "$dir/${cve}"-*.sh; do
-                idx=$((idx + 1))
-                dest=".hotfixes-selected/$(printf '%03d' "$idx")-$(basename "$f")"
-                cp "$f" "$dest"
-                SELECTED_FILES+=("$f")
-                printf '%s\n' "$f" >> .hotfixes-selected-files.txt
-                matched_this_cve=1
-                found=1
-              done
-              shopt -u nullglob
-            done
+          unmatched_cves="$(
+            jq -r '
+              (.unmatched_cves // [])
+              | join(",")
+            ' .hotfixes-selected-report.json
+          )"
 
-            if [ "$matched_this_cve" -eq 1 ]; then
-              MATCHED_CVES+=("$cve")
-            else
-              UNMATCHED_CVES+=("$cve")
-            fi
-          done
+          selected_files="$(
+            jq -r '
+              (.selected_files // [])
+              | .[]
+            ' .hotfixes-selected-report.json
+          )"
 
-          joined() {
-            local IFS=','
-            echo "$*"
-          }
-
-          if [ "$found" -eq 1 ]; then
+          if [ "${selected_count}" -gt 0 ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "matched_cves=$(joined "${MATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
-          echo "unmatched_cves=$(joined "${UNMATCHED_CVES[@]}")" >> "$GITHUB_OUTPUT"
-          echo "selected_count=${#SELECTED_FILES[@]}" >> "$GITHUB_OUTPUT"
+          echo "matched_cves=${matched_cves}" >> "$GITHUB_OUTPUT"
+          echo "unmatched_cves=${unmatched_cves}" >> "$GITHUB_OUTPUT"
+          echo "selected_count=${selected_count}" >> "$GITHUB_OUTPUT"
+
+          : > .hotfixes-selected-files.txt
+          if [ -n "${selected_files}" ]; then
+            printf '%s\n' "${selected_files}" > .hotfixes-selected-files.txt
+          fi
 
       - name: Rebuild local image with selected hotfixes
         if: steps.hotfixes.outputs.enabled == 'true'

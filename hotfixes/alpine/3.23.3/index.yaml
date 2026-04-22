@@ -1,0 +1,60 @@
+hotfixes:
+  # BEGIN AUTO-GENERATED HOTFIX
+  # generator: legacy-cve-grouping-v2
+  # source_suffix: libexpat
+  # content_sha256: 3c999914a9813e1f8d267ee10c33f1fff24a0bf44b5ba7925872d9085baa5cf2
+  # group_size: 3
+  # legacy_files: CVE-2026-32767-libexpat.sh, CVE-2026-32777-libexpat.sh, CVE-2026-32778-libexpat.sh
+  - id: "apk-upgrade-libexpat"
+    file: "apk-upgrade-libexpat.sh"
+    match:
+      cves:
+        - "CVE-2026-32767"
+        - "CVE-2026-32777"
+        - "CVE-2026-32778"
+  # END AUTO-GENERATED HOTFIX
+  # BEGIN AUTO-GENERATED HOTFIX
+  # generator: legacy-cve-grouping-v2
+  # source_suffix: musl-utils
+  # content_sha256: bd4c41e1291830bbd6b167327741b31297f32a4b3b85329edf187e35760b8c2c
+  # group_size: 2
+  # legacy_files: CVE-2026-40200-musl-utils.sh, CVE-2026-6042-musl-utils.sh
+  - id: "apk-upgrade-musl-utils"
+    file: "apk-upgrade-musl-utils.sh"
+    match:
+      cves:
+        - "CVE-2026-40200"
+        - "CVE-2026-6042"
+  # END AUTO-GENERATED HOTFIX
+  # BEGIN AUTO-GENERATED HOTFIX
+  # generator: legacy-cve-grouping-v2
+  # source_suffix: openssl
+  # content_sha256: 7b8746cc93ba084b63a8719517a0c2807b66282049130e61d4d4bd141e1e8693
+  # group_size: 5
+  # legacy_files: CVE-2026-28388-openssl.sh, CVE-2026-28389-openssl.sh, CVE-2026-28390-openssl.sh, CVE-2026-31789-openssl.sh, CVE-2026-31790-openssl.sh
+  - id: "apk-upgrade-openssl"
+    file: "apk-upgrade-openssl.sh"
+    match:
+      cves:
+        - "CVE-2026-28388"
+        - "CVE-2026-28389"
+        - "CVE-2026-28390"
+        - "CVE-2026-31789"
+        - "CVE-2026-31790"
+  # END AUTO-GENERATED HOTFIX
+  - id: "apk-upgrade-imagemagick"
+    file: "apk-upgrade-imagemagick.sh"
+    match:
+      cves:
+        - "CVE-2026-33899"
+        - "CVE-2026-33900"
+        - "CVE-2026-33901"
+        - "CVE-2026-33902"
+        - "CVE-2026-33905"
+        - "CVE-2026-33908"
+        - "CVE-2026-34238"
+        - "CVE-2026-40169"
+        - "CVE-2026-40183"
+        - "CVE-2026-40310"
+        - "CVE-2026-40311"
+        - "CVE-2026-40312"
