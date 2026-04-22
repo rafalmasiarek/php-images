@@ -46,6 +46,8 @@ hotfixes:
     file: "apk-upgrade-imagemagick.sh"
     match:
       cves:
+        - "CVE-2026-33535"
+        - "CVE-2026-33536"
         - "CVE-2026-33899"
         - "CVE-2026-33900"
         - "CVE-2026-33901"
@@ -58,3 +60,29 @@ hotfixes:
         - "CVE-2026-40310"
         - "CVE-2026-40311"
         - "CVE-2026-40312"
+  - id: "apk-upgrade-net-snmp"
+    file: "apk-upgrade-net-snmp.sh"
+    match:
+      cves:
+        - "CVE-2025-68615"
+
+  - id: "apk-upgrade-zlib"
+    file: "apk-upgrade-zlib.sh"
+    match:
+      cves:
+        - "CVE-2026-22184"
+        - "CVE-2026-27171"
+
+  - id: "apk-upgrade-util-linux"
+    file: "apk-upgrade-util-linux.sh"
+    match:
+      cves:
+        - "CVE-2026-27456"
+
+  - id: "apk-upgrade-libpng"
+    file: "apk-upgrade-libpng.sh"
+    match:
+      cves:
+        - "CVE-2026-33416"
+        - "CVE-2026-33636"
+        - "CVE-2026-34757"
