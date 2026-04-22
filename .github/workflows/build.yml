@@ -54,6 +54,8 @@ jobs:
       count: ${{ steps.gen.outputs.count }}
       phps: ${{ steps.gen.outputs.phps }}
       full: ${{ steps.gen.outputs.full }}
+      built_pairs: ${{ steps.gen.outputs.built_pairs }}
+      alpine_groups: ${{ steps.gen.outputs.alpine_groups }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -253,12 +255,38 @@ jobs:
 
           matrix = {"include": include}
 
+          built_pairs = [
+              {"php": php, "variant": variant}
+              for php, variant in pairs_to_build
+          ]
+
+          alpine_groups: dict[str, list[dict[str, str]]] = {}
+          for php, variant in all_variant_pairs():
+              dockerfile = dockerfile_for(php, variant)
+              if not dockerfile:
+                  continue
+
+              full, minor = dockerfile_alpine_versions(dockerfile)
+              alpine_key = minor or full or "unknown"
+
+              alpine_groups.setdefault(alpine_key, []).append(
+                  {"php": php, "variant": variant}
+              )
+
+          for key in alpine_groups:
+              alpine_groups[key] = sorted(
+                  alpine_groups[key],
+                  key=lambda x: (x["php"], x["variant"]),
+              )
+
           out_path = os.environ["GITHUB_OUTPUT"]
           with open(out_path, "a", encoding="utf-8") as fh:
               fh.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
               fh.write("count=" + str(len(include)) + "\n")
               fh.write("phps=" + json.dumps(phps_to_build, separators=(",", ":")) + "\n")
               fh.write("full=" + ("true" if full_build else "false") + "\n")
+              fh.write("built_pairs=" + json.dumps(built_pairs, separators=(",", ":")) + "\n")
+              fh.write("alpine_groups=" + json.dumps(alpine_groups, separators=(",", ":")) + "\n")
           PY
 
   build:
@@ -1404,6 +1432,8 @@ jobs:
         uses: actions/github-script@v9
         env:
           FULL_BUILD: ${{ needs.discover.outputs.full }}
+          BUILT_PAIRS: ${{ needs.discover.outputs.built_pairs }}
+          ALPINE_GROUPS: ${{ needs.discover.outputs.alpine_groups }}
         with:
           script: |
             const fs = require("fs");
@@ -1412,6 +1442,57 @@ jobs:
             const repo = context.repo.repo;
             const fullBuild = String(process.env.FULL_BUILD || "").toLowerCase() === "true";
             const groups = JSON.parse(fs.readFileSync("aggregated-vulns.json", "utf8"));
+
+            const builtPairs = JSON.parse(process.env.BUILT_PAIRS || "[]");
+            const alpineGroups = JSON.parse(process.env.ALPINE_GROUPS || "{}");
+
+            const pairKey = (php, variant) => `${php}/${variant}`;
+
+            const builtPairSet = new Set(
+              builtPairs.map(item => pairKey(item.php, item.variant))
+            );
+
+            const isGroupCovered = pairs => {
+              const expected = new Set((pairs || []).map(item => pairKey(item.php, item.variant)));
+              if (expected.size === 0) {
+                return false;
+              }
+
+              for (const key of expected) {
+                if (!builtPairSet.has(key)) {
+                  return false;
+                }
+              }
+
+              return true;
+            };
+
+            const fullyCoveredAlpineGroups = new Set();
+            for (const [alpineMinor, pairs] of Object.entries(alpineGroups)) {
+              if (isGroupCovered(pairs)) {
+                fullyCoveredAlpineGroups.add(alpineMinor);
+              }
+            }
+
+            const fullyCoveredPhpAlpineGroups = new Set();
+            for (const [alpineMinor, pairs] of Object.entries(alpineGroups)) {
+              const byPhp = new Map();
+
+              for (const item of pairs || []) {
+                const php = item.php || "";
+                if (!php) continue;
+                if (!byPhp.has(php)) {
+                  byPhp.set(php, []);
+                }
+                byPhp.get(php).push(item);
+              }
+
+              for (const [php, phpPairs] of byPhp.entries()) {
+                if (isGroupCovered(phpPairs)) {
+                  fullyCoveredPhpAlpineGroups.add(`${php}|${alpineMinor}`);
+                }
+              }
+            }
 
             const ensureLabel = async (name, color, description) => {
               try {
@@ -1683,10 +1764,6 @@ jobs:
               }
             }
 
-            if (!fullBuild) {
-              return;
-            }
-
             for (const issue of managedOpenIssues) {
               const key = parseMarkerValue(issue.body, "cve-key");
               if (!key || currentKeys.has(key)) {
@@ -1696,11 +1773,34 @@ jobs:
               const scope = parseMarkerValue(issue.body, "scope");
               const parts = key.split("|");
 
+              let canClose = false;
               let closeMessage = "Latest automated Trivy scan no longer detects this CVE. Closing issue.";
+
+              if (fullBuild) {
+                canClose = true;
+              } else if (scope === "os" && parts.length >= 3) {
+                const alpine = parts[1].replace(/^alpine-/, "");
+                if (fullyCoveredAlpineGroups.has(alpine)) {
+                  canClose = true;
+                  closeMessage = `Latest automated Trivy scan no longer detects this CVE for images based on Alpine ${alpine}. Closing issue.`;
+                }
+              } else if (scope === "php" && parts.length >= 4) {
+                const php = parts[1].replace(/^php-/, "");
+                const alpine = parts[2].replace(/^alpine-/, "");
+                if (fullyCoveredPhpAlpineGroups.has(`${php}|${alpine}`)) {
+                  canClose = true;
+                  closeMessage = `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images on Alpine ${alpine}. Closing issue.`;
+                }
+              }
+
+              if (!canClose) {
+                continue;
+              }
 
               if (scope === "php" && parts.length >= 4) {
                 const php = parts[1].replace(/^php-/, "");
-                closeMessage = `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images. Closing issue.`;
+                const alpine = parts[2].replace(/^alpine-/, "");
+                closeMessage = `Latest automated Trivy scan no longer detects this CVE for PHP ${php} images on Alpine ${alpine}. Closing issue.`;
               } else if (scope === "os" && parts.length >= 3) {
                 const alpine = parts[1].replace(/^alpine-/, "");
                 closeMessage = `Latest automated Trivy scan no longer detects this CVE for images based on Alpine ${alpine}. Closing issue.`;
