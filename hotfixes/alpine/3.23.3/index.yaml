@@ -60,8 +60,8 @@ hotfixes:
         - "CVE-2026-40310"
         - "CVE-2026-40311"
         - "CVE-2026-40312"
-  - id: "apk-upgrade-net-snmp"
-    file: "apk-upgrade-net-snmp.sh"
+  - id: "apk-upgrade-net-snmp-libs"
+    file: "apk-upgrade-net-snmp-libs.sh"
     match:
       cves:
         - "CVE-2025-68615"
