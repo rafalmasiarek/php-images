@@ -46,6 +46,7 @@ hotfixes:
     file: "apk-upgrade-imagemagick.sh"
     match:
       cves:
+        - "CVE-2026-33899"
         - "CVE-2026-33900"
         - "CVE-2026-33901"
         - "CVE-2026-33902"
