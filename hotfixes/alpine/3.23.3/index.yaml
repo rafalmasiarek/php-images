@@ -42,3 +42,18 @@ hotfixes:
         - "CVE-2026-31789"
         - "CVE-2026-31790"
   # END AUTO-GENERATED HOTFIX
+  - id: "apk-upgrade-imagemagick"
+    file: "apk-upgrade-imagemagick.sh"
+    match:
+      cves:
+        - "CVE-2026-33900"
+        - "CVE-2026-33901"
+        - "CVE-2026-33902"
+        - "CVE-2026-33905"
+        - "CVE-2026-33908"
+        - "CVE-2026-34238"
+        - "CVE-2026-40169"
+        - "CVE-2026-40183"
+        - "CVE-2026-40310"
+        - "CVE-2026-40311"
+        - "CVE-2026-40312"
