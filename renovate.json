@@ -10,6 +10,9 @@
     "dependencies"
   ],
   "dependencyDashboard": true,
+  "dependencyDashboardLabels": [
+    "todoist-exclude"
+  ],
   "schedule": [
     "after 02:00 and before 06:00"
   ],
