@@ -111,3 +111,12 @@ hotfixes:
     - libcrypto3<3.5.8-r0
     - libssl3<3.5.8-r0
     - openssl<3.5.8-r0
+- id: apk-upgrade-libblkid-2.42.3-r1-libmount-2.42.3-r1-libuuid-2.42.3-r1
+  file: apk-upgrade-libblkid-2.42.3-r1-libmount-2.42.3-r1-libuuid-2.42.3-r1.sh
+  match:
+    cves:
+    - CVE-2026-78408
+    packages:
+    - libblkid<2.42.3-r1
+    - libmount<2.42.3-r1
+    - libuuid<2.42.3-r1
