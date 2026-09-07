@@ -80,3 +80,10 @@ hotfixes:
     packages:
     - curl<8.14.1-r3
     - libcurl<8.14.1-r3
+- id: apk-upgrade-libuuid-2.41.6-r1
+  file: apk-upgrade-libuuid-2.41.6-r1.sh
+  match:
+    cves:
+    - CVE-2026-78408
+    packages:
+    - libuuid<2.41.6-r1
