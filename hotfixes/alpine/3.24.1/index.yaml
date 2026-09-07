@@ -120,3 +120,19 @@ hotfixes:
     - libblkid<2.42.3-r1
     - libmount<2.42.3-r1
     - libuuid<2.42.3-r1
+- id: apk-upgrade-libblkid-2.42.3-r0-libmount-2.42.3-r0-libuuid-2.42.3-r0
+  file: apk-upgrade-libblkid-2.42.3-r0-libmount-2.42.3-r0-libuuid-2.42.3-r0.sh
+  match:
+    cves:
+    - CVE-2026-27456
+    - CVE-2026-53612
+    - CVE-2026-53613
+    - CVE-2026-53614
+    - CVE-2026-76642
+    - CVE-2026-78408
+    - CVE-2026-78409
+    - CVE-2026-78410
+    packages:
+    - libblkid<2.42.3-r0
+    - libmount<2.42.3-r0
+    - libuuid<2.42.3-r0
