@@ -87,3 +87,16 @@ hotfixes:
     - CVE-2026-78408
     packages:
     - libuuid<2.41.6-r1
+- id: apk-upgrade-libuuid-2.41.6-r0
+  file: apk-upgrade-libuuid-2.41.6-r0.sh
+  match:
+    cves:
+    - CVE-2025-14104
+    - CVE-2026-27456
+    - CVE-2026-53612
+    - CVE-2026-53613
+    - CVE-2026-53614
+    - CVE-2026-76642
+    - CVE-2026-78410
+    packages:
+    - libuuid<2.41.6-r0
